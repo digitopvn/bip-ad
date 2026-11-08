@@ -167,7 +167,7 @@ app.post('/checkout/:id/pay', async c => {
     if (method === 'wallet') {
       const r = await beginCheckout(c.env.DB, cfg, user.id, id, 'wallet');
       if (r.dueMinor !== 0) return c.redirect(`/checkout/${id}?r=error`, 303);
-      const s = await settle(c.env.DB, cfg, { intentId: id, provider: 'wallet', providerPaymentId: `wallet_${id}`, currency: intent.quote_currency, cashMinor: 0, confirmedAtMs: Date.now() });
+      const s = await settle(c.env.DB, cfg, { intentId: id, provider: 'wallet', providerPaymentId: `wallet_${id}`, currency: intent.quote_currency, cashMinor: 0, confirmedAtMs: Date.now(), isTest: cfg.paymentMode === 'simulated' });
       return c.redirect(`/checkout/${id}?r=${s.status === 'rejected' ? 'error' : 'paid'}`, 303);
     }
     if (method !== 'paypal' && method !== 'sepay') return c.redirect(`/checkout/${id}?r=error`, 303);
@@ -330,7 +330,7 @@ app.get('/api/boards/:board', async c => {
   const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
   const key = new Request(new URL(`/api/boards/${board}`, c.req.url).toString());
   const hit = await cache?.match(key);
-  if (hit) return hit;
+  if (hit) return new Response(hit.body, hit); // cached headers are immutable; secureHeaders must add its own
   const { view } = await boardView(c.env, board);
   const res = c.json(view, 200, { 'cache-control': 'public, max-age=15' });
   if (cache) c.executionCtx.waitUntil(cache.put(key, res.clone()));

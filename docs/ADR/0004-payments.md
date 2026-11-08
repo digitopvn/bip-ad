@@ -23,7 +23,9 @@ Real sandbox credentials were out of scope for this MVP. The sandbox and live pa
   - the response of the server-side capture call.
 - `PENDING` and `DENIED` captures never confirm a bid.
 - `REFUNDED` and `REVERSED` run the refund path. The capture is resolved through `links[rel=up]`.
-- A `REFUNDED` event carries the refunded amount. A **partial refund keeps the bid**: it is recorded in `payment_reviews` for the operator, and the ledger is not changed automatically. A later full refund reverses the bid.
+- A `REFUNDED` event carries that refund's own amount. A **partial refund keeps the bid**: it is recorded in `payment_reviews` for the operator, and the ledger is not changed automatically. When the recorded refunds of a capture add up to the captured cash, the whole payment is reversed like a full refund and those reviews are closed.
+- A capture sent through the other provider than the intent's is recorded for review; the intent is left untouched so the right provider can still pay it.
+- A reversal of a capture that only exists as a review (never settled) changes nothing and is not retried.
 
 ## SePay
 - The checkout form is signed with HMAC-SHA256 over the fields in the documented order, then base64-encoded.

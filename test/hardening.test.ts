@@ -89,9 +89,14 @@ describe('reversals', () => {
     expect(await units(p)).toBe(1500);
     const rv = await db().prepare(`SELECT kind, amount_minor, status FROM payment_reviews WHERE bid_intent_id = ? AND kind = 'partial_refund'`).bind(intent.id).first();
     expect(rv).toEqual({ kind: 'partial_refund', amount_minor: 100, status: 'open' });
-    // A full refund afterwards still reverses the bid.
-    expect((await processEvent(db(), sandbox(), refundEvent(capId, '15.00'))).status).toBe('refunded');
+    // PayPal reports each refund's own amount: refunds that add up to the capture reverse the bid.
+    const rest = refundEvent(capId, '14.00');
+    expect((await processEvent(db(), sandbox(), rest)).status).toBe('refunded');
     expect(await units(p)).toBe(0);
+    expect((await processEvent(db(), sandbox(), rest)).status).toBe('replayed');
+    const open = await db().prepare(`SELECT COUNT(*) AS n FROM payment_reviews WHERE bid_intent_id = ? AND status = 'open'`).bind(intent.id).first<{ n: number }>();
+    expect(open!.n).toBe(0);
+    expect(await ledgerBalancedEverywhere()).toBe(true);
   });
 
   it('a refund racing the cohort finalization never leaves the ads accounts inconsistent', async () => {
@@ -232,7 +237,11 @@ describe('moderation of published products', () => {
     expect(pub).toMatchObject({ ok: true, pendingReview: true });
     const before = await db().prepare('SELECT current_page_version_id, pending_page_version_id FROM products WHERE id = ?').bind(p).first<{ current_page_version_id: string; pending_page_version_id: string }>();
     expect(before!.current_page_version_id).not.toBe(before!.pending_page_version_id);
-    const after = await moderateProduct(db(), 'operator:test', p, 'approve', 'OK');
+    // The operator must name the version they reviewed; a stale version is refused.
+    await expect(moderateProduct(db(), 'operator:test', p, 'approve', 'OK')).rejects.toMatchObject({ code: 'version_required' });
+    const v = (await db().prepare('SELECT version FROM products WHERE id = ?').bind(p).first<{ version: number }>())!.version;
+    await expect(moderateProduct(db(), 'operator:test', p, 'approve', 'OK', Date.now(), v - 1)).rejects.toMatchObject({ code: 'version_conflict' });
+    const after = await moderateProduct(db(), 'operator:test', p, 'approve', 'OK', Date.now(), v);
     expect(after.website_url).toBe('https://elsewhere.example.com');
     expect(after.pending_edit_json).toBeNull();
     expect(after.current_page_version_id).toBe(before!.pending_page_version_id);
@@ -317,5 +326,45 @@ describe('sign-in and MCP consent', () => {
     // The callback without the upstream binding cookie is refused.
     const cb = await SELF.fetch(`${BASE}/auth/github/callback?code=x&state=${loc.searchParams.get('state')}`, { redirect: 'manual' });
     expect(cb.headers.get('location')).toBe('/login?error=state');
+  });
+});
+
+describe('round-two regressions', () => {
+  it('the edge-cached board JSON is served with 200 on a cache hit', async () => {
+    const first = await SELF.fetch(`${BASE}/api/boards/weekly`);
+    expect(first.status).toBe(200);
+    await first.text();
+    await new Promise(r => setTimeout(r, 50));
+    const second = await SELF.fetch(`${BASE}/api/boards/weekly`);
+    expect(second.status).toBe(200);
+    expect(second.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('IPv6 visitors are counted once per /64', async () => {
+    const { networkKey } = await import('../src/domain/measurement');
+    expect(networkKey('2001:db8:1:2:aaaa::1')).toBe(networkKey('2001:0db8:0001:0002:ffff:1:2:3'));
+    expect(networkKey('2001:db8:1:2::')).toBe('2001:db8:1:2::/64');
+    expect(networkKey('2001:db8:1:3::1')).not.toBe(networkKey('2001:db8:1:2::1'));
+    expect(networkKey('203.0.113.7')).toBe('203.0.113.7');
+  });
+
+  it('a capture through the wrong provider is kept for review without touching the intent', async () => {
+    const { intent } = await openIntent();
+    const ev = { provider: 'sepay' as const, eventId: newId('ipn'), eventType: 'ORDER_PAID', action: 'capture_completed' as const, intentId: intent.id, providerPaymentId: 'TX-WRONG-' + intent.id, currency: 'VND', amountMinor: 381000 };
+    expect((await processEvent(db(), sandbox(), ev)).status).toBe('review:intent_provider_mismatch');
+    expect((await getIntent(db(), intent.id))!.status).toBe('awaiting_payment');
+    const rv = await db().prepare(`SELECT reason FROM payment_reviews WHERE provider_payment_id = ?`).bind(ev.providerPaymentId).first();
+    expect(rv).toEqual({ reason: 'intent_provider_mismatch' });
+  });
+
+  it('a lock run out of order does not pull an earlier day into the later cohort', async () => {
+    const C = cutoffForIctDate('2036-06-06');
+    const u = await makeUser();
+    const p = await makeProduct(u, 'Out Of Order');
+    await bid(u, p, 'weekly', 4000, C - 60_000);
+    await finalizeCohort(db(), 'weekly', C + DAY_MS, C + DAY_MS + 1000);
+    await finalizeCohort(db(), 'weekly', C, C + DAY_MS + 2000);
+    const rows = await db().prepare(`SELECT cutoff_at, eligible_revenue_minor FROM revenue_cohorts WHERE board = 'weekly' AND cutoff_at IN (?, ?) AND currency = 'USD' ORDER BY cutoff_at`).bind(iso(C), iso(C + DAY_MS)).all();
+    expect(rows.results).toEqual([{ cutoff_at: iso(C), eligible_revenue_minor: 4000 }, { cutoff_at: iso(C + DAY_MS), eligible_revenue_minor: 0 }]);
   });
 });

@@ -6,7 +6,7 @@ import { BOARDS, config, isBoard } from '../domain/config';
 import { resolvePaymentReview } from '../domain/bidding';
 import { DomainError } from '../domain/errors';
 import { decisionStatement } from '../domain/ledger';
-import { moderateProduct } from '../domain/products';
+import { moderateProduct, pendingModeration } from '../domain/products';
 import { finalizeCohort, freezeBoard, produceMockMedia, runLock } from '../domain/snapshot';
 import { failPayout, preparePayoutBatch, recordManualTransfer } from '../domain/wallet';
 import type { Env } from '../env';
@@ -46,10 +46,13 @@ export function operatorMcpServer(env: Env) {
     };
   });
 
-  jsonTool(server, 'products.moderate', 'Approve, reject or suspend a product, with a reason code (logged).', {
-    product_id: z.string(), decision: z.enum(['approve', 'reject', 'suspend']), reason: z.string().max(200),
+  jsonTool(server, 'products.pending', 'Products waiting for moderation: submissions, and pending field edits or page versions of published products (with their version).', {}, true,
+    async () => ({ products: await pendingModeration(db) }));
+
+  jsonTool(server, 'products.moderate', 'Approve, reject or suspend a product, with a reason code (logged). Approving pending changes needs the product_version you reviewed (from products.pending).', {
+    product_id: z.string(), decision: z.enum(['approve', 'reject', 'suspend']), reason: z.string().max(200), product_version: z.number().int().optional(),
   }, false, async a => {
-    const p = await moderateProduct(db, ACTOR, a.product_id, a.decision, a.reason);
+    const p = await moderateProduct(db, ACTOR, a.product_id, a.decision, a.reason, Date.now(), a.product_version);
     return { product_id: p.id, status: p.status };
   });
 

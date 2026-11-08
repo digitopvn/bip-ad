@@ -1,0 +1,1 @@
+- [Probe tests in read-only reviews](reference_probe_tests.md) — run vitest probes from the scratchpad against bid-ad source without editing repo files

@@ -61,8 +61,9 @@ async function tryFinalizeCohort(db: D1Database, board: Board, cutoffMs: number,
   if (done.results.length) return { created: false, cohorts: done.results.map(r => r.id) };
   const { results } = await db.prepare(`SELECT c.id, c.currency, c.gross_minor, c.ads_minor, c.commission_minor, c.platform_minor, p.wallet_minor
       FROM bid_contributions c JOIN payments p ON p.bid_intent_id = c.bid_intent_id
-      WHERE c.board = ? AND c.assigned_cutoff_at <= ? AND c.status = 'active'
-        AND NOT EXISTS (SELECT 1 FROM revenue_cohort_contributions rc WHERE rc.bid_contribution_id = c.id)`).bind(board, cutoff)
+      WHERE c.board = ? AND c.status = 'active'
+        AND (c.assigned_cutoff_at = ? OR (c.assigned_cutoff_at < ? AND EXISTS (SELECT 1 FROM revenue_cohorts rc WHERE rc.board = c.board AND rc.cutoff_at = c.assigned_cutoff_at)))
+        AND NOT EXISTS (SELECT 1 FROM revenue_cohort_contributions rc WHERE rc.bid_contribution_id = c.id)`).bind(board, cutoff, cutoff)
     .all<{ id: string; currency: string; gross_minor: number; ads_minor: number; commission_minor: number; platform_minor: number; wallet_minor: number }>();
 
   const byCurrency = new Map<string, typeof results>();

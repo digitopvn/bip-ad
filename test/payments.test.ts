@@ -139,7 +139,7 @@ describe('SePay Payment Gateway', () => {
 
   it('an IPN for a PayPal intent cannot settle it (provider binding)', async () => {
     const { intent } = await openIntent('paypal');
-    expect((await processEvent(db(), sandboxCfg(), normalizeSePay(ipn(intent.id, 'TX-M', 1500)))).status).toBe('rejected:intent_provider_mismatch');
+    expect((await processEvent(db(), sandboxCfg(), normalizeSePay(ipn(intent.id, 'TX-M', 1500)))).status).toBe('review:intent_provider_mismatch');
   });
 
   it('checkout form signature follows the documented field order and skips empty fields', async () => {

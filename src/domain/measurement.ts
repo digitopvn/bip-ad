@@ -15,7 +15,17 @@ export const isLikelyBot = (ua: string | null | undefined) => !ua || ua.length <
  * Daily salt: visitors cannot be linked across days from the stored hash.
  */
 export async function visitorHash(secret: string, ip: string, nowMs: number) {
-  return (await sha256Hex(`${secret}|${ictDate(nowMs)}|${ip}`)).slice(0, 32);
+  return (await sha256Hex(`${secret}|${ictDate(nowMs)}|${networkKey(ip)}`)).slice(0, 32);
+}
+
+/** IPv4: the address. IPv6: its /64, the unit one subscriber usually controls. */
+export function networkKey(ip: string) {
+  if (!ip.includes(':')) return ip;
+  const [head, tail = ''] = ip.toLowerCase().split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail ? tail.split(':') : [];
+  const full = ip.includes('::') ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t] : h;
+  return `${full.slice(0, 4).map(x => x.replace(/^0+(?=.)/, '')).join(':')}::/64`;
 }
 
 export async function recordEvent(db: D1Database, e: { productId: string; type: MeasureType; visitor: string; source: string; nowMs?: number }) {

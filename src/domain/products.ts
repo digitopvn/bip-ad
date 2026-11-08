@@ -3,8 +3,8 @@
 import { newId, slugify } from '../lib/ids';
 import { iso } from '../lib/time';
 import { type Config, MODERATION_POLICY_VERSION } from './config';
-import { DomainError, forbidden, isConstraintError, notFound } from './errors';
-import { decisionStatement, outboxStatement } from './ledger';
+import { DomainError, forbidden, isConstraintError, isGuardError, notFound } from './errors';
+import { decisionStatement, guardStatement, outboxStatement } from './ledger';
 import { PAGE_SCHEMA_VERSION, safeUrl, validateBlocks } from './widgets';
 
 export interface ProductRow {
@@ -203,12 +203,20 @@ function approvePageStatements(db: D1Database, productId: string, pageVersionId:
  * - reject: a published product keeps its live version and loses its pending changes; otherwise it is rejected;
  * - suspend: unpublish, and remove it from every snapshot whose media is not final (A17).
  */
-export async function moderateProduct(db: D1Database, actor: string, productId: string, decision: 'approve' | 'reject' | 'suspend', reason: string, nowMs = Date.now()) {
+export async function moderateProduct(db: D1Database, actor: string, productId: string, decision: 'approve' | 'reject' | 'suspend', reason: string, nowMs = Date.now(), expectedVersion?: number) {
   const p = await getProduct(db, productId);
   if (!p) throw notFound('Product not found');
+  // Approving pending changes must approve exactly what the operator reviewed: the owner could
+  // swap the pending edit or page between the review and the approval.
+  if (decision === 'approve' && (p.pending_edit_json || p.pending_page_version_id) && expectedVersion === undefined) {
+    throw new DomainError('version_required', `Pass product_version (currently ${p.version}) to approve pending changes`, 409);
+  }
+  if (expectedVersion !== undefined && expectedVersion !== p.version) throw new DomainError('version_conflict', `Product is at version ${p.version}; review it again`, 409);
   const now = iso(nowMs);
-  const status = decision === 'approve' ? 'published' : decision === 'suspend' ? 'suspended' : p.status === 'published' ? 'published' : 'rejected';
+  // A suspended product stays suspended when its pending changes are rejected.
+  const status = decision === 'approve' ? 'published' : decision === 'suspend' ? 'suspended' : p.status === 'published' || p.status === 'suspended' ? p.status : 'rejected';
   const stmts: D1PreparedStatement[] = [
+    guardStatement(db, 'EXISTS (SELECT 1 FROM products WHERE id = ? AND version = ?)', p.id, p.version),
     db.prepare(`UPDATE products SET status = ?, published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, ?) ELSE published_at END, updated_at = ? WHERE id = ?`)
       .bind(status, status, now, now, p.id),
   ];
@@ -239,8 +247,22 @@ export async function moderateProduct(db: D1Database, actor: string, productId: 
     decisionStatement(db, { actor, action: 'products.moderate', decision: decision === 'approve' ? 'allow' : 'deny', reasons: [reason || decision.toUpperCase()], policy: MODERATION_POLICY_VERSION, resourceId: p.id }, now),
     outboxStatement(db, decision === 'approve' ? 'ProductApproved' : decision === 'suspend' ? 'ProductSuspended' : 'ProductRejected', p.id, { decision, reason }, now),
   );
-  await db.batch(stmts);
+  try {
+    await db.batch(stmts);
+  } catch (e) {
+    if (isGuardError(e)) throw new DomainError('version_conflict', 'Product changed during moderation; review it again', 409);
+    throw e;
+  }
   return (await getProduct(db, p.id))!;
+}
+
+/** Products waiting for the operator: submissions and pending changes to published products. */
+export async function pendingModeration(db: D1Database) {
+  const { results } = await db.prepare(`SELECT p.id, p.slug, p.name, p.tagline, p.website_url, p.status, p.version, p.pending_edit_json, p.pending_page_version_id, v.blocks_json AS pending_blocks_json
+      FROM products p LEFT JOIN product_page_versions v ON v.id = p.pending_page_version_id
+      WHERE p.status = 'pending_review' OR p.pending_edit_json IS NOT NULL OR p.pending_page_version_id IS NOT NULL
+      ORDER BY p.updated_at LIMIT 100`).all<Record<string, unknown>>();
+  return results;
 }
 
 export async function setBlocks(db: D1Database, userId: string, productId: string, blocks: unknown, nowMs = Date.now()) {
@@ -282,7 +304,7 @@ export async function publishPage(db: D1Database, cfg: Config, userId: string, p
   await db.batch([
     ...(live
       ? approvePageStatements(db, p.id, row.id, now)
-      : [db.prepare('UPDATE products SET pending_page_version_id = ?, updated_at = ? WHERE id = ?').bind(row.id, now, p.id)]),
+      : [db.prepare('UPDATE products SET pending_page_version_id = ?, version = version + 1, updated_at = ? WHERE id = ?').bind(row.id, now, p.id)]),
     decisionStatement(db, { actor: 'system:auto-moderation', action: 'pages.publish', decision: live ? 'allow' : 'defer', reasons: screen.reasons, policy: MODERATION_POLICY_VERSION, resourceId: row.id }, now),
     outboxStatement(db, live ? 'PagePublished' : 'PageSubmitted', p.id, { pageVersionId: row.id, version: row.version }, now),
   ]);

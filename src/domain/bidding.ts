@@ -213,7 +213,7 @@ export const cashAccount = (provider: string, isTest: boolean) => (isTest ? acct
  * Money arrived that cannot be applied automatically. Record it for the operator, move the intent
  * to needs_review and give back any wallet reservation, so nothing is silently kept or locked.
  */
-async function flagCaptureForReview(db: D1Database, s: SettlementInput, intent: IntentRow | null, reason: string) {
+export async function flagCaptureForReview(db: D1Database, s: SettlementInput, intent: IntentRow | null, reason: string) {
   const now = iso(s.confirmedAtMs);
   const stmts: D1PreparedStatement[] = [
     db.prepare(`INSERT INTO payment_reviews (id, provider, event_ref, kind, bid_intent_id, provider_payment_id, currency, amount_minor, reason, is_test, status, created_at)
@@ -337,14 +337,17 @@ export async function refund(db: D1Database, r: RefundInput): Promise<RefundResu
     if (reversed || pay.state !== 'captured') return { status: 'duplicate' };
     const now = iso(r.atMs);
     if (r.amountMinor !== undefined && r.amountMinor < pay.cash_minor) {
-      // Partial refund: the bid stays (policy in ADR-0004); the operator reconciles the difference.
+      // Partial refund: the bid stays (policy in ADR-0004) until the refunds add up to the captured
+      // cash; then the whole payment is reversed like a full refund. Each event is recorded once.
       await db.batch([
         db.prepare(`INSERT INTO payment_reviews (id, provider, event_ref, kind, bid_intent_id, provider_payment_id, currency, amount_minor, reason, is_test, status, created_at)
                     VALUES (?, ?, ?, 'partial_refund', ?, ?, ?, ?, 'partial_refund', ?, 'open', ?) ON CONFLICT (provider, event_ref) DO NOTHING`)
           .bind(newId('prv'), r.provider, r.eventRef ?? `partial:${r.providerPaymentId}:${r.amountMinor}`, pay.bid_intent_id, r.providerPaymentId, pay.currency, r.amountMinor, pay.is_test, now),
         outboxStatement(db, 'PartialRefundNeedsReview', pay.id, { amount: r.amountMinor, captured: pay.cash_minor }, now),
       ]);
-      return { status: 'partial_review' };
+      const total = await db.prepare(`SELECT COALESCE(SUM(amount_minor), 0) AS s FROM payment_reviews
+          WHERE provider = ? AND provider_payment_id = ? AND kind = 'partial_refund'`).bind(r.provider, r.providerPaymentId).first<{ s: number }>();
+      if ((total?.s ?? 0) < pay.cash_minor) return { status: 'partial_review' };
     }
     const ctb = await db.prepare('SELECT * FROM bid_contributions WHERE bid_intent_id = ?').bind(pay.bid_intent_id)
       .first<{ id: string; owner_id: string; board: Board; ads_minor: number; commission_minor: number; platform_minor: number; currency: string }>();
@@ -404,6 +407,8 @@ export async function refund(db: D1Database, r: RefundInput): Promise<RefundResu
         db.prepare(`UPDATE bid_contributions SET status = 'voided_after_refund', voided_at = ? WHERE id = ?`).bind(now, ctb.id),
         db.prepare(`UPDATE bid_intents SET status = 'refunded', updated_at = ? WHERE id = ?`).bind(now, pay.bid_intent_id),
         outboxStatement(db, r.kind === 'refund' ? 'RefundRecorded' : 'ChargebackRecorded', pay.id, { contributionId: ctb.id, afterCohort: inCohort }, now),
+        db.prepare(`UPDATE payment_reviews SET status = 'settled', resolution = 'payment fully reversed', resolved_at = ?
+                    WHERE provider = ? AND provider_payment_id = ? AND kind = 'partial_refund' AND status = 'open'`).bind(now, r.provider, r.providerPaymentId),
       ]);
       return { status: 'refunded' };
     } catch (e) {
