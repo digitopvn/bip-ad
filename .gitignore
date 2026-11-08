@@ -11,3 +11,6 @@ coverage/
 *.log
 .DS_Store
 seed/sample.sql
+
+# Local agent notes
+.claude/agent-memory/
