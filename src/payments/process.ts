@@ -113,6 +113,8 @@ async function apply(db: D1Database, cfg: Config, ev: NormalizedEvent, nowMs: nu
       if ((total?.s ?? 0) < captured) return 'partial_review';
     }
     for (const rv of held) await resolvePaymentReview(db, cfg, 'system:provider', rv.id, 'dismiss', `${ev.action} by provider`, nowMs);
+    await db.prepare(`UPDATE payment_reviews SET status = 'dismissed', resolution = 'capture fully reversed', resolved_at = ?
+                      WHERE provider = ? AND provider_payment_id = ? AND kind = 'partial_refund' AND status = 'open'`).bind(iso(nowMs), ev.provider, ev.providerPaymentId).run();
     // If the operator settled the capture meanwhile, the payment exists now (or soon): reverse it.
     const again = await refund(db, { provider: ev.provider, providerPaymentId: ev.providerPaymentId, kind: ev.action, atMs: nowMs, eventRef: ev.eventId });
     if (again.status !== 'unknown') return again.status;

@@ -456,6 +456,12 @@ export async function intentStatus(db: D1Database, userId: string, intentId: str
   };
 }
 
+/** A settlement claim this old with no payment means the settling request died; the review can be resolved again. */
+export const STALE_CLAIM_MS = 10 * 60_000;
+/** SQL condition (one bind: the stale-claim cutoff) for a review that can still be resolved: open, or a stale settlement claim. */
+export const RESOLVABLE_REVIEW = `(status = 'open' OR (status = 'settled' AND kind = 'capture' AND resolved_at <= ?
+  AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.provider = payment_reviews.provider AND p.provider_payment_id = payment_reviews.provider_payment_id)))`;
+
 /**
  * Operator resolution of a payment review.
  * - settle: the captured cash equals the full locked quote of an intent with no wallet portion;
@@ -468,17 +474,26 @@ export async function resolvePaymentReview(db: D1Database, cfg: Config, actor: s
     id: string; provider: Provider; kind: string; bid_intent_id: string | null; provider_payment_id: string | null; currency: string | null; amount_minor: number | null; status: string; is_test: number;
   }>();
   if (!rv) throw notFound('Review not found');
-  if (rv.status !== 'open') return { review_id: rv.id, status: rv.status };
   const now = iso(nowMs);
-  const close = (status: 'settled' | 'dismissed', extra: D1PreparedStatement[] = []) => db.batch([
-    db.prepare(`UPDATE payment_reviews SET status = ?, resolution = ?, resolved_at = ? WHERE id = ? AND status = 'open'`).bind(status, note.slice(0, 300), now, rv.id),
-    decisionStatement(db, { actor, action: 'payments.resolve_review', decision: status === 'settled' ? 'allow' : 'deny', reasons: [note.slice(0, 120) || resolution.toUpperCase()], policy: 'payments-v1', resourceId: rv.id }, now),
-    ...extra,
-  ]);
+  const stale = iso(nowMs - STALE_CLAIM_MS);
+  if (!(await db.prepare(`SELECT 1 FROM payment_reviews WHERE id = ? AND ${RESOLVABLE_REVIEW}`).bind(rv.id, stale).first())) return { review_id: rv.id, status: rv.status };
   if (resolution === 'dismiss') {
     const others = rv.bid_intent_id ? await db.prepare(`SELECT 1 FROM payment_reviews WHERE bid_intent_id = ? AND status = 'open' AND kind = 'capture' AND id <> ?`).bind(rv.bid_intent_id, rv.id).first() : null;
     const held = !others && rv.bid_intent_id ? (await getIntent(db, rv.bid_intent_id))?.status === 'needs_review' : false;
-    await close('dismissed', held ? [db.prepare(`UPDATE bid_intents SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'needs_review'`).bind(now, rv.bid_intent_id)] : []);
+    const resolutionNote = note.slice(0, 300);
+    try {
+      await db.batch([
+        db.prepare(`UPDATE payment_reviews SET status = 'dismissed', resolution = ?, resolved_at = ? WHERE id = ? AND ${RESOLVABLE_REVIEW}`).bind(resolutionNote, now, rv.id, stale),
+        // The side effects apply only if this request closed the review (not a concurrent claim).
+        guardStatement(db, `EXISTS (SELECT 1 FROM payment_reviews WHERE id = ? AND status = 'dismissed' AND resolved_at = ? AND resolution = ?)`, rv.id, now, resolutionNote),
+        decisionStatement(db, { actor, action: 'payments.resolve_review', decision: 'deny', reasons: [note.slice(0, 120) || 'DISMISS'], policy: 'payments-v1', resourceId: rv.id }, now),
+        ...(held ? [db.prepare(`UPDATE bid_intents SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'needs_review'`).bind(now, rv.bid_intent_id)] : []),
+      ]);
+    } catch (e) {
+      if (!isGuardError(e)) throw e;
+      const cur = await db.prepare('SELECT status FROM payment_reviews WHERE id = ?').bind(rv.id).first<{ status: string }>();
+      return { review_id: rv.id, status: cur?.status ?? 'unknown' };
+    }
     // An intent that never moved to needs_review (e.g. a wrong-provider capture) can still be paid: keep its wallet reservation.
     if (held) await releaseWallet(db, rv.bid_intent_id!, 'payment review dismissed', nowMs);
     return { review_id: rv.id, status: 'dismissed' };
@@ -488,8 +503,9 @@ export async function resolvePaymentReview(db: D1Database, cfg: Config, actor: s
     throw new DomainError('not_settleable', 'Only a capture of exactly the full locked quote (no wallet portion) can be settled; dismiss it and refund at the provider instead', 409);
   }
   // Claim first: a provider reversal racing this settlement then sees a settled review and retries
-  // until the payment exists, instead of dismissing a review that is being settled.
-  const claim = await db.prepare(`UPDATE payment_reviews SET status = 'settled', resolution = ?, resolved_at = ? WHERE id = ? AND status = 'open'`).bind(note.slice(0, 300), now, rv.id).run();
+  // until the payment exists, instead of dismissing a review that is being settled. A claim whose
+  // request died without a payment turns resolvable again after STALE_CLAIM_MS.
+  const claim = await db.prepare(`UPDATE payment_reviews SET status = 'settled', resolution = ?, resolved_at = ? WHERE id = ? AND ${RESOLVABLE_REVIEW}`).bind(note.slice(0, 300), now, rv.id, stale).run();
   if (!claim.meta.changes) {
     const cur = await db.prepare('SELECT status FROM payment_reviews WHERE id = ?').bind(rv.id).first<{ status: string }>();
     return { review_id: rv.id, status: cur?.status ?? 'unknown' };

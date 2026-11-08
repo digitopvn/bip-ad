@@ -3,7 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { BOARDS, config, isBoard } from '../domain/config';
-import { resolvePaymentReview } from '../domain/bidding';
+import { RESOLVABLE_REVIEW, resolvePaymentReview, STALE_CLAIM_MS } from '../domain/bidding';
 import { DomainError } from '../domain/errors';
 import { decisionStatement } from '../domain/ledger';
 import { moderateProduct, pendingModeration } from '../domain/products';
@@ -48,7 +48,7 @@ export function operatorMcpServer(env: Env) {
   jsonTool(server, 'products.pending', 'Products waiting for moderation: submissions, and pending field edits or page versions of published products (with their version).', {}, true,
     async () => ({ products: await pendingModeration(db) }));
 
-  jsonTool(server, 'products.moderate', 'Approve, reject or suspend a product, with a reason code (logged). Approving pending changes needs the product_version you reviewed (from products.pending).', {
+  jsonTool(server, 'products.moderate', 'Approve, reject or suspend a product, with a reason code (logged). Every approval needs the product_version you reviewed (from products.pending).', {
     product_id: z.string(), decision: z.enum(['approve', 'reject', 'suspend']), reason: z.string().max(200), product_version: z.number().int().optional(),
   }, false, async a => {
     const p = await moderateProduct(db, ACTOR, a.product_id, a.decision, a.reason, Date.now(), a.product_version);
@@ -111,8 +111,10 @@ export function operatorMcpServer(env: Env) {
   jsonTool(server, 'payouts.fail', 'Mark a payout as failed and return funds to the available balance.', { payout_request_id: z.string(), reason: z.string().max(200) }, false,
     async a => failPayout(db, ACTOR, a.payout_request_id, a.reason));
 
-  jsonTool(server, 'payments.reviews', 'Open payment reviews: captures that did not match their intent, captures for closed intents, partial refunds.', { status: z.enum(['open', 'settled', 'dismissed']).optional() }, true, async a => {
-    const { results } = await db.prepare('SELECT * FROM payment_reviews WHERE status = ? ORDER BY created_at LIMIT 200').bind(a.status ?? 'open').all();
+  jsonTool(server, 'payments.reviews', 'Payment reviews (default: still resolvable): captures that did not match their intent, captures for closed intents, partial refunds, and settlement claims that died before the payment was recorded.', { status: z.enum(['open', 'settled', 'dismissed']).optional() }, true, async a => {
+    const { results } = a.status
+      ? await db.prepare('SELECT * FROM payment_reviews WHERE status = ? ORDER BY created_at LIMIT 200').bind(a.status).all()
+      : await db.prepare(`SELECT * FROM payment_reviews WHERE ${RESOLVABLE_REVIEW} ORDER BY created_at LIMIT 200`).bind(iso(Date.now() - STALE_CLAIM_MS)).all();
     return { reviews: results };
   });
 

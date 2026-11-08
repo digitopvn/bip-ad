@@ -484,3 +484,48 @@ describe('round-four regressions', () => {
     expect((await db().prepare(`SELECT status FROM payment_reviews WHERE provider_payment_id = ? AND kind = 'capture'`).bind(capId).first<{ status: string }>())!.status).toBe('dismissed');
   });
 });
+
+describe('round-five regressions', () => {
+  async function heldCapture(tag: string) {
+    const { p, intent } = await openIntent();
+    await db().prepare(`UPDATE bid_intents SET status = 'cancelled' WHERE id = ?`).bind(intent.id).run();
+    const capId = `CAP-${tag}-` + intent.id;
+    await processEvent(db(), sandbox(), capture(intent.id, capId, '15.00'));
+    await db().prepare(`UPDATE bid_intents SET status = 'needs_review' WHERE id = ?`).bind(intent.id).run();
+    const rv = await db().prepare('SELECT id FROM payment_reviews WHERE provider_payment_id = ?').bind(capId).first<{ id: string }>();
+    return { p, intent, capId, reviewId: rv!.id };
+  }
+  const claimAt = (id: string, atMs: number) =>
+    db().prepare(`UPDATE payment_reviews SET status = 'settled', resolution = 'claimed', resolved_at = ? WHERE id = ?`).bind(iso(atMs), id).run();
+
+  it('a settlement claim that died before the payment can be resumed by the operator', async () => {
+    const { p, reviewId } = await heldCapture('STUCK');
+    await claimAt(reviewId, Date.now() - 11 * 60_000); // the settling request crashed 11 minutes ago
+    const r = await resolvePaymentReview(db(), sandbox(), 'operator:test', reviewId, 'settle', 'resume');
+    expect(r.status).toBe('settled');
+    expect(await units(p)).toBeGreaterThan(0);
+    expect(await ledgerBalancedEverywhere()).toBe(true);
+  });
+
+  it('a provider refund of a dead settlement claim dismisses it instead of retrying forever', async () => {
+    const { capId, reviewId } = await heldCapture('STUCKREF');
+    await claimAt(reviewId, Date.now() - 11 * 60_000);
+    expect((await processEvent(db(), sandbox(), refundEvent(capId))).status).toBe('reviewed_capture_reversed');
+    expect((await db().prepare('SELECT status FROM payment_reviews WHERE id = ?').bind(reviewId).first<{ status: string }>())!.status).toBe('dismissed');
+  });
+
+  it('a fresh settlement claim is not dismissed: the refund asks for redelivery', async () => {
+    const { capId, reviewId } = await heldCapture('FRESH');
+    await claimAt(reviewId, Date.now());
+    expect((await processEvent(db(), sandbox(), refundEvent(capId))).status).toBe('retry');
+    expect((await resolvePaymentReview(db(), sandbox(), 'operator:test', reviewId, 'dismiss', 'x')).status).toBe('settled');
+  });
+
+  it('partial refunds that reach the capture close their partial-refund reviews too', async () => {
+    const { capId } = await heldCapture('PARTS');
+    await processEvent(db(), sandbox(), refundEvent(capId, '5.00'));
+    await processEvent(db(), sandbox(), refundEvent(capId, '10.00'));
+    const open = await db().prepare(`SELECT COUNT(*) AS n FROM payment_reviews WHERE provider_payment_id = ? AND status = 'open'`).bind(capId).first<{ n: number }>();
+    expect(open!.n).toBe(0);
+  });
+});

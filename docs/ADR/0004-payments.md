@@ -26,7 +26,7 @@ Real sandbox credentials were out of scope for this MVP. The sandbox and live pa
 - A `REFUNDED` event carries that refund's own amount. A **partial refund keeps the bid**: it is recorded in `payment_reviews` for the operator, and the ledger is not changed automatically. When the recorded refunds of a capture add up to the captured cash, the whole payment is reversed like a full refund and those reviews are closed.
 - A capture sent through the other provider than the intent's is recorded for review; the intent is left untouched so the right provider can still pay it.
 - A reversal of a capture that only exists as a review (never settled) changes no ledger entry; it dismisses the review, so money already returned cannot be settled. A partial refund of held money keeps the review open until the refunds reach the captured amount.
-- An operator settlement claims the review before settling. A reversal that races it sees the claimed review, reverses the payment once it exists, or asks the provider to redeliver.
+- An operator settlement claims the review before settling. A reversal that races it sees the claimed review, reverses the payment once it exists, or asks the provider to redeliver. A claim that is older than 10 minutes and has no payment means the settling request died; it is listed again in `payments.reviews` and can be settled or dismissed (including by a provider reversal).
 - Dismissing a review fails its intent only when no other open capture review still needs that intent.
 
 ## SePay
