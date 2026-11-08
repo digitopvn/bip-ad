@@ -183,17 +183,17 @@ export async function submitProduct(db: D1Database, cfg: Config, userId: string,
 
 function publishLatestPageStatements(db: D1Database, productId: string, now: string) {
   return [
-    db.prepare(`UPDATE product_page_versions SET moderation_status = 'approved', published_at = COALESCE(published_at, ?)
-                WHERE id = (SELECT id FROM product_page_versions WHERE product_id = ? ORDER BY version DESC LIMIT 1)`).bind(now, productId),
     db.prepare(`UPDATE products SET current_page_version_id = COALESCE(current_page_version_id,
                 (SELECT id FROM product_page_versions WHERE product_id = ? ORDER BY version DESC LIMIT 1)) WHERE id = ?`).bind(productId, productId),
+    db.prepare(`UPDATE product_page_versions SET moderation_status = 'approved', published_at = COALESCE(published_at, ?)
+                WHERE id = (SELECT current_page_version_id FROM products WHERE id = ?)`).bind(now, productId),
   ];
 }
 
-function approvePageStatements(db: D1Database, productId: string, pageVersionId: string, now: string) {
+function approvePageStatements(db: D1Database, productId: string, pageVersionId: string, now: string, bumpVersion = false) {
   return [
     db.prepare(`UPDATE product_page_versions SET moderation_status = 'approved', published_at = COALESCE(published_at, ?) WHERE id = ? AND product_id = ?`).bind(now, pageVersionId, productId),
-    db.prepare('UPDATE products SET current_page_version_id = ?, pending_page_version_id = NULL, updated_at = ? WHERE id = ?').bind(pageVersionId, now, productId),
+    db.prepare(`UPDATE products SET current_page_version_id = ?, pending_page_version_id = NULL, version = version + ?, updated_at = ? WHERE id = ?`).bind(pageVersionId, bumpVersion ? 1 : 0, now, productId),
   ];
 }
 
@@ -209,9 +209,9 @@ export async function moderateProduct(db: D1Database, actor: string, productId: 
   // Approving pending changes must approve exactly what the operator reviewed: the owner could
   // swap the pending edit or page between the review and the approval.
   if (decision === 'approve' && expectedVersion === undefined) {
-    throw new DomainError('version_required', `Pass product_version (currently ${p.version}, from products.pending) to approve`, 409);
+    throw new DomainError('version_required', 'Pass the product_version you reviewed (from products.pending) to approve', 409);
   }
-  if (expectedVersion !== undefined && expectedVersion !== p.version) throw new DomainError('version_conflict', `Product is at version ${p.version}; review it again`, 409);
+  if (expectedVersion !== undefined && expectedVersion !== p.version) throw new DomainError('version_conflict', 'The product changed since you reviewed it; list it again with products.pending', 409);
   const now = iso(nowMs);
   // A suspended product stays suspended when its pending changes are rejected.
   const status = decision === 'approve' ? 'published' : decision === 'suspend' ? 'suspended' : p.status === 'published' || p.status === 'suspended' ? p.status : 'rejected';
@@ -261,7 +261,7 @@ export async function pendingModeration(db: D1Database) {
   // The page shown is the one approval would publish: the pending version, or for a submission the latest draft.
   const { results } = await db.prepare(`SELECT p.id, p.slug, p.name, p.tagline, p.website_url, p.status, p.version, p.pending_edit_json, p.pending_page_version_id, v.version AS page_version, v.blocks_json
       FROM products p LEFT JOIN product_page_versions v ON v.id = COALESCE(p.pending_page_version_id,
-        CASE WHEN p.status = 'pending_review' THEN (SELECT id FROM product_page_versions WHERE product_id = p.id ORDER BY version DESC LIMIT 1) END)
+        CASE WHEN p.status = 'pending_review' THEN COALESCE(p.current_page_version_id, (SELECT id FROM product_page_versions WHERE product_id = p.id ORDER BY version DESC LIMIT 1)) END)
       WHERE p.status = 'pending_review' OR p.pending_edit_json IS NOT NULL OR p.pending_page_version_id IS NOT NULL
       ORDER BY p.updated_at LIMIT 100`).all<Record<string, unknown>>();
   return results;
@@ -309,7 +309,7 @@ export async function publishPage(db: D1Database, cfg: Config, userId: string, p
   const live = screen.decision === 'allow' && (p.status !== 'published' || cfg.autoApprove);
   await db.batch([
     ...(live
-      ? approvePageStatements(db, p.id, row.id, now)
+      ? approvePageStatements(db, p.id, row.id, now, true)
       : [db.prepare('UPDATE products SET pending_page_version_id = ?, version = version + 1, updated_at = ? WHERE id = ?').bind(row.id, now, p.id)]),
     decisionStatement(db, { actor: 'system:auto-moderation', action: 'pages.publish', decision: live ? 'allow' : 'defer', reasons: screen.reasons, policy: MODERATION_POLICY_VERSION, resourceId: row.id }, now),
     outboxStatement(db, live ? 'PagePublished' : 'PageSubmitted', p.id, { pageVersionId: row.id, version: row.version }, now),

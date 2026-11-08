@@ -419,3 +419,68 @@ describe('round-three regressions', () => {
     expect(c).toEqual({ eligible_revenue_minor: 6000 });
   });
 });
+
+describe('round-four regressions', () => {
+  it('publishing another page after review invalidates the reviewed version; pending shows the page approval publishes', async () => {
+    const u = await makeUser();
+    const { createProduct, submitProduct, pendingModeration } = await import('../src/domain/products');
+    const strict = { ...cfg(), autoApprove: false };
+    const pr = await createProduct(db(), u, { name: 'Page Pin', tagline: 'Pin', website_url: 'https://pin.example.com' }, newId('k'));
+    await setBlocks(db(), u, pr.id, [{ type: 'hero', headline: 'Old page' }]);
+    await publishPage(db(), strict, u, pr.id, 1);
+    await setBlocks(db(), u, pr.id, [{ type: 'hero', headline: 'Draft page' }]);
+    await submitProduct(db(), strict, u, pr.id);
+    const listed = (await pendingModeration(db())).find(x => x.id === pr.id)!;
+    expect(String(listed.blocks_json)).toContain('Old page'); // the current page is what approval publishes
+    await publishPage(db(), strict, u, pr.id, 2);
+    await expect(moderateProduct(db(), 'operator:test', pr.id, 'approve', 'OK', Date.now(), listed.version as number)).rejects.toMatchObject({ code: 'version_conflict' });
+    const relisted = (await pendingModeration(db())).find(x => x.id === pr.id)!;
+    expect(String(relisted.blocks_json)).toContain('Draft page');
+    const approved = await moderateProduct(db(), 'operator:test', pr.id, 'approve', 'OK', Date.now(), relisted.version as number);
+    const page = await db().prepare('SELECT blocks_json FROM product_page_versions WHERE id = ?').bind(approved.current_page_version_id).first<{ blocks_json: string }>();
+    expect(page!.blocks_json).toContain('Draft page');
+  });
+
+  it('a provider reversal racing an operator settlement still reverses the payment', async () => {
+    const { p, intent } = await openIntent();
+    await db().prepare(`UPDATE bid_intents SET status = 'cancelled' WHERE id = ?`).bind(intent.id).run();
+    const capId = 'CAP-RACE-' + intent.id;
+    await processEvent(db(), sandbox(), capture(intent.id, capId, '15.00'));
+    await db().prepare(`UPDATE bid_intents SET status = 'needs_review' WHERE id = ?`).bind(intent.id).run();
+    const rv = await db().prepare('SELECT id FROM payment_reviews WHERE provider_payment_id = ?').bind(capId).first<{ id: string }>();
+    const ev = refundEvent(capId);
+    for (let i = 0; i < 5; i++) {
+      await Promise.allSettled([
+        resolvePaymentReview(db(), sandbox(), 'operator:test', rv!.id, 'settle', 'ok'),
+        processEvent(db(), sandbox(), ev),
+      ]);
+    }
+    await processEvent(db(), sandbox(), ev); // redelivery after any 'retry'
+    const pay = await db().prepare('SELECT state FROM payments WHERE bid_intent_id = ?').bind(intent.id).first<{ state: string }>();
+    // Either the refund won (never settled) or the settlement won and was then reversed.
+    expect(pay === null || pay.state === 'refunded').toBe(true);
+    expect(await units(p)).toBe(0);
+    expect(await ledgerBalancedEverywhere()).toBe(true);
+  });
+
+  it('dismissing one review does not fail an intent that another open review still needs', async () => {
+    const { intent } = await openIntent();
+    await processEvent(db(), sandbox(), capture(intent.id, 'CAP-A-' + intent.id, '2.00'));
+    await db().prepare(`INSERT INTO payment_reviews (id, provider, event_ref, kind, bid_intent_id, provider_payment_id, currency, amount_minor, reason, status, created_at)
+        VALUES (?, 'paypal', ?, 'capture', ?, ?, 'USD', 1500, 'intent_needs_review', 'open', ?)`).bind(newId('prv'), 'capture:CAP-B-' + intent.id, intent.id, 'CAP-B-' + intent.id, iso(Date.now())).run();
+    const first = await db().prepare('SELECT id FROM payment_reviews WHERE provider_payment_id = ?').bind('CAP-A-' + intent.id).first<{ id: string }>();
+    await resolvePaymentReview(db(), sandbox(), 'operator:test', first!.id, 'dismiss', 'refunded');
+    expect((await getIntent(db(), intent.id))!.status).toBe('needs_review');
+  });
+
+  it('a partial refund of a held capture keeps the review open until refunds reach the capture', async () => {
+    const { intent } = await openIntent();
+    await db().prepare(`UPDATE bid_intents SET status = 'cancelled' WHERE id = ?`).bind(intent.id).run();
+    const capId = 'CAP-HP-' + intent.id;
+    await processEvent(db(), sandbox(), capture(intent.id, capId, '15.00'));
+    expect((await processEvent(db(), sandbox(), refundEvent(capId, '1.00'))).status).toBe('partial_review');
+    expect((await db().prepare(`SELECT status FROM payment_reviews WHERE provider_payment_id = ? AND kind = 'capture'`).bind(capId).first<{ status: string }>())!.status).toBe('open');
+    expect((await processEvent(db(), sandbox(), refundEvent(capId, '14.00'))).status).toBe('reviewed_capture_reversed');
+    expect((await db().prepare(`SELECT status FROM payment_reviews WHERE provider_payment_id = ? AND kind = 'capture'`).bind(capId).first<{ status: string }>())!.status).toBe('dismissed');
+  });
+});

@@ -476,7 +476,8 @@ export async function resolvePaymentReview(db: D1Database, cfg: Config, actor: s
     ...extra,
   ]);
   if (resolution === 'dismiss') {
-    const held = rv.bid_intent_id ? (await getIntent(db, rv.bid_intent_id))?.status === 'needs_review' : false;
+    const others = rv.bid_intent_id ? await db.prepare(`SELECT 1 FROM payment_reviews WHERE bid_intent_id = ? AND status = 'open' AND kind = 'capture' AND id <> ?`).bind(rv.bid_intent_id, rv.id).first() : null;
+    const held = !others && rv.bid_intent_id ? (await getIntent(db, rv.bid_intent_id))?.status === 'needs_review' : false;
     await close('dismissed', held ? [db.prepare(`UPDATE bid_intents SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'needs_review'`).bind(now, rv.bid_intent_id)] : []);
     // An intent that never moved to needs_review (e.g. a wrong-provider capture) can still be paid: keep its wallet reservation.
     if (held) await releaseWallet(db, rv.bid_intent_id!, 'payment review dismissed', nowMs);
@@ -486,8 +487,24 @@ export async function resolvePaymentReview(db: D1Database, cfg: Config, actor: s
   if (rv.kind !== 'capture' || !intent || !rv.provider_payment_id || intent.wallet_applied_minor !== 0 || rv.currency !== intent.quote_currency || rv.amount_minor !== intent.quote_minor) {
     throw new DomainError('not_settleable', 'Only a capture of exactly the full locked quote (no wallet portion) can be settled; dismiss it and refund at the provider instead', 409);
   }
-  const r = await settle(db, cfg, { intentId: intent.id, provider: rv.provider, providerPaymentId: rv.provider_payment_id, currency: rv.currency!, cashMinor: rv.amount_minor!, confirmedAtMs: nowMs, isTest: !!rv.is_test, fromReview: true });
-  if (r.status !== 'settled' && r.status !== 'duplicate') throw new DomainError('not_settleable', `Settlement refused: ${r.reason}`, 409);
-  await close('settled');
+  // Claim first: a provider reversal racing this settlement then sees a settled review and retries
+  // until the payment exists, instead of dismissing a review that is being settled.
+  const claim = await db.prepare(`UPDATE payment_reviews SET status = 'settled', resolution = ?, resolved_at = ? WHERE id = ? AND status = 'open'`).bind(note.slice(0, 300), now, rv.id).run();
+  if (!claim.meta.changes) {
+    const cur = await db.prepare('SELECT status FROM payment_reviews WHERE id = ?').bind(rv.id).first<{ status: string }>();
+    return { review_id: rv.id, status: cur?.status ?? 'unknown' };
+  }
+  let r: SettlementResult;
+  try {
+    r = await settle(db, cfg, { intentId: intent.id, provider: rv.provider, providerPaymentId: rv.provider_payment_id, currency: rv.currency!, cashMinor: rv.amount_minor!, confirmedAtMs: nowMs, isTest: !!rv.is_test, fromReview: true });
+  } catch (e) {
+    await db.prepare(`UPDATE payment_reviews SET status = 'open', resolution = NULL, resolved_at = NULL WHERE id = ?`).bind(rv.id).run();
+    throw e;
+  }
+  if (r.status !== 'settled' && r.status !== 'duplicate') {
+    await db.prepare(`UPDATE payment_reviews SET status = 'open', resolution = NULL, resolved_at = NULL WHERE id = ?`).bind(rv.id).run();
+    throw new DomainError('not_settleable', `Settlement refused: ${r.reason}`, 409);
+  }
+  await decisionStatement(db, { actor, action: 'payments.resolve_review', decision: 'allow', reasons: [note.slice(0, 120) || 'SETTLE'], policy: 'payments-v1', resourceId: rv.id }, now).run();
   return { review_id: rv.id, status: 'settled', settlement: r };
 }

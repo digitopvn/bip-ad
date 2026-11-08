@@ -98,12 +98,26 @@ async function apply(db: D1Database, cfg: Config, ev: NormalizedEvent, nowMs: nu
     if (r.status !== 'unknown') return r.status;
     // A reversal of a capture we only hold as a review (never settled) needs no ledger change, but
     // the review must close so the operator can no longer settle money that was returned.
-    const { results: open } = await db.prepare(`SELECT id FROM payment_reviews WHERE provider = ? AND provider_payment_id = ? AND kind = 'capture'`)
-      .bind(ev.provider, ev.providerPaymentId).all<{ id: string }>();
+    const { results: held } = await db.prepare(`SELECT id, bid_intent_id, currency, amount_minor, is_test FROM payment_reviews WHERE provider = ? AND provider_payment_id = ? AND kind = 'capture'`)
+      .bind(ev.provider, ev.providerPaymentId).all<{ id: string; bid_intent_id: string | null; currency: string | null; amount_minor: number | null; is_test: number }>();
     // Otherwise it may have arrived before its capture: ask the provider to redeliver.
-    if (!open.length) return 'retry';
-    for (const rv of open) await resolvePaymentReview(db, cfg, 'system:provider', rv.id, 'dismiss', `${ev.action} by provider`, nowMs);
-    return 'reviewed_capture_reversed';
+    if (!held.length) return 'retry';
+    const captured = held[0].amount_minor ?? 0;
+    if (ev.amountMinor !== undefined && ev.amountMinor < captured) {
+      // A partial refund of held money: record it; the review stays open until refunds reach the capture.
+      await db.prepare(`INSERT INTO payment_reviews (id, provider, event_ref, kind, bid_intent_id, provider_payment_id, currency, amount_minor, reason, is_test, status, created_at)
+                        VALUES (?, ?, ?, 'partial_refund', ?, ?, ?, ?, 'partial_refund_of_held_capture', ?, 'open', ?) ON CONFLICT (provider, event_ref) DO NOTHING`)
+        .bind(newId('prv'), ev.provider, ev.eventId, held[0].bid_intent_id, ev.providerPaymentId, held[0].currency, ev.amountMinor, held[0].is_test, iso(nowMs)).run();
+      const total = await db.prepare(`SELECT COALESCE(SUM(amount_minor), 0) AS s FROM payment_reviews WHERE provider = ? AND provider_payment_id = ? AND kind = 'partial_refund'`)
+        .bind(ev.provider, ev.providerPaymentId).first<{ s: number }>();
+      if ((total?.s ?? 0) < captured) return 'partial_review';
+    }
+    for (const rv of held) await resolvePaymentReview(db, cfg, 'system:provider', rv.id, 'dismiss', `${ev.action} by provider`, nowMs);
+    // If the operator settled the capture meanwhile, the payment exists now (or soon): reverse it.
+    const again = await refund(db, { provider: ev.provider, providerPaymentId: ev.providerPaymentId, kind: ev.action, atMs: nowMs, eventRef: ev.eventId });
+    if (again.status !== 'unknown') return again.status;
+    const settled = await db.prepare(`SELECT 1 FROM payment_reviews WHERE provider = ? AND provider_payment_id = ? AND kind = 'capture' AND status = 'settled'`).bind(ev.provider, ev.providerPaymentId).first();
+    return settled ? 'retry' : 'reviewed_capture_reversed';
   }
   return 'ignored';
 }
