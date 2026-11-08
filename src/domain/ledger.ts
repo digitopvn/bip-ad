@@ -92,3 +92,12 @@ export function decisionStatement(db: D1Database, d: { actor: string; action: st
   return db.prepare('INSERT INTO decision_logs (id, actor, action, decision, reason_codes_json, policy_version, resource_id, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .bind(newId('dec'), d.actor, d.action, d.decision, JSON.stringify(d.reasons), d.policy, d.resourceId ?? null, d.result === undefined ? null : JSON.stringify(d.result), now);
 }
+
+/**
+ * Abort the surrounding batch unless `condition` (a SQL boolean expression) holds at this point
+ * of the batch. Used after "UPDATE ... WHERE state = ?" so a lost race fails loudly instead of
+ * posting money for a transition that did not happen.
+ */
+export function guardStatement(db: D1Database, condition: string, ...binds: unknown[]) {
+  return db.prepare(`INSERT INTO batch_guards (ok) SELECT NULL WHERE NOT (${condition})`).bind(...binds);
+}

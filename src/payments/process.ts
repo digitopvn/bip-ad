@@ -17,19 +17,24 @@ export interface NormalizedEvent {
   providerPaymentId?: string;
   currency?: string;
   amountMinor?: number;
+  /** Simulated money (PAYMENT_MODE=simulated): kept apart from real cash and never payable. */
+  isTest?: boolean;
 }
 
 export function normalizePayPal(e: PayPalEvent): NormalizedEvent {
   const base = { provider: 'paypal' as const, eventId: e.id, eventType: e.event_type };
+  const amount = e.resource.amount ? toMinorUSD(e.resource.amount.value) : undefined;
   switch (e.event_type) {
     case 'PAYMENT.CAPTURE.COMPLETED':
       if (e.resource.status !== 'COMPLETED' || !e.resource.amount) return { ...base, action: 'ignore' };
       return { ...base, action: 'capture_completed', intentId: e.resource.custom_id ?? e.resource.invoice_id, providerPaymentId: e.resource.id,
-        currency: e.resource.amount.currency_code, amountMinor: toMinorUSD(e.resource.amount.value) };
+        currency: e.resource.amount.currency_code, amountMinor: amount };
     case 'PAYMENT.CAPTURE.REFUNDED':
-      return { ...base, action: 'refund', providerPaymentId: refundedCaptureId(e) ?? undefined };
+      // The resource is the refund; its amount is what was refunded (may be partial).
+      return { ...base, action: 'refund', providerPaymentId: refundedCaptureId(e) ?? undefined, amountMinor: amount };
     case 'PAYMENT.CAPTURE.REVERSED':
-      return { ...base, action: 'chargeback', providerPaymentId: e.resource.id };
+      // Resolve the capture through links[rel=up] when the resource is a refund-type object.
+      return { ...base, action: 'chargeback', providerPaymentId: refundedCaptureId(e) ?? e.resource.id };
     default:
       // PENDING / DENIED and anything else never confirm a bid.
       return { ...base, action: 'ignore' };
@@ -47,27 +52,50 @@ export function normalizeSePay(e: SePayIpn): NormalizedEvent {
   return { ...base, action: 'ignore' };
 }
 
-export async function processEvent(db: D1Database, cfg: Config, ev: NormalizedEvent, nowMs = Date.now()) {
+/** Statuses after which a redelivered event is acknowledged without being processed again. */
+const FINAL = (status: string) => status !== 'received' && status !== 'failed' && status !== 'retry';
+
+/**
+ * Apply a verified provider event at most once in effect. The event row is a delivery log, not a
+ * lock: a redelivery of an event that is still `received` (crashed mid-way), `failed` or `retry`
+ * is processed again, which is safe because settle/refund are idempotent by their own UNIQUE keys.
+ * `retry` (e.g. a refund that arrived before its capture) and `failed` ask the provider to redeliver.
+ */
+export async function processEvent(db: D1Database, cfg: Config, ev: NormalizedEvent, nowMs = Date.now()): Promise<{ status: string; retry?: boolean }> {
   try {
     await db.prepare(`INSERT INTO webhook_events (id, provider, event_id, event_type, signature_verified, status, received_at) VALUES (?, ?, ?, ?, 1, 'received', ?)`)
       .bind(newId('whk'), ev.provider, ev.eventId, ev.eventType, iso(nowMs)).run();
   } catch (e) {
-    if (isConstraintError(e)) return { status: 'replayed' as const };
-    throw e;
+    if (!isConstraintError(e)) throw e;
+    const prior = await db.prepare('SELECT status FROM webhook_events WHERE provider = ? AND event_id = ?').bind(ev.provider, ev.eventId).first<{ status: string }>();
+    if (prior && FINAL(prior.status)) return { status: 'replayed' };
   }
   let status: string;
+  try {
+    status = await apply(db, cfg, ev, nowMs);
+  } catch (e) {
+    console.error('webhook processing failed', ev.provider, ev.eventId, e);
+    await db.prepare('UPDATE webhook_events SET status = ?, detail = ? WHERE provider = ? AND event_id = ?')
+      .bind('failed', String(e instanceof Error ? e.message : e).slice(0, 500), ev.provider, ev.eventId).run().catch(() => undefined);
+    return { status: 'failed', retry: true };
+  }
+  await db.prepare('UPDATE webhook_events SET status = ? WHERE provider = ? AND event_id = ?').bind(status, ev.provider, ev.eventId).run();
+  return status === 'retry' ? { status, retry: true } : { status };
+}
+
+async function apply(db: D1Database, cfg: Config, ev: NormalizedEvent, nowMs: number): Promise<string> {
   if (ev.action === 'capture_completed' && ev.intentId && ev.providerPaymentId && Number.isSafeInteger(ev.amountMinor)) {
     const intent = await getIntent(db, ev.intentId);
-    if (!intent || intent.provider !== ev.provider) status = 'rejected:intent_provider_mismatch';
-    else {
-      const r = await settle(db, cfg, { intentId: ev.intentId, provider: ev.provider, providerPaymentId: ev.providerPaymentId, currency: ev.currency!, cashMinor: ev.amountMinor!, confirmedAtMs: nowMs });
-      status = r.status === 'rejected' ? `rejected:${r.reason}` : r.status;
-    }
-  } else if ((ev.action === 'refund' || ev.action === 'chargeback') && ev.providerPaymentId) {
-    status = (await refund(db, { provider: ev.provider, providerPaymentId: ev.providerPaymentId, kind: ev.action, atMs: nowMs })).status;
-  } else status = 'ignored';
-  await db.prepare('UPDATE webhook_events SET status = ? WHERE provider = ? AND event_id = ?').bind(status, ev.provider, ev.eventId).run();
-  return { status };
+    if (intent && intent.provider !== ev.provider) return 'rejected:intent_provider_mismatch';
+    const r = await settle(db, cfg, { intentId: ev.intentId, provider: ev.provider, providerPaymentId: ev.providerPaymentId, currency: ev.currency!, cashMinor: ev.amountMinor!, confirmedAtMs: nowMs, isTest: ev.isTest });
+    return r.status === 'rejected' ? `review:${r.reason}` : r.status;
+  }
+  if ((ev.action === 'refund' || ev.action === 'chargeback') && ev.providerPaymentId) {
+    const r = await refund(db, { provider: ev.provider, providerPaymentId: ev.providerPaymentId, kind: ev.action, atMs: nowMs, amountMinor: ev.amountMinor, eventRef: ev.eventId });
+    // A reversal for a payment we have not recorded yet may have arrived before its capture.
+    return r.status === 'unknown' ? 'retry' : r.status;
+  }
+  return 'ignored';
 }
 
 /**
@@ -80,5 +108,5 @@ export async function simulatePayment(db: D1Database, cfg: Config, intentId: str
   if (!intent) throw new Error('unknown intent');
   const due = intent.quote_minor - intent.wallet_applied_minor;
   const sim = `sim_${intentId}`;
-  return processEvent(db, cfg, { provider, eventId: `sim:${intentId}`, eventType: 'SIMULATED_CAPTURE', action: 'capture_completed', intentId, providerPaymentId: sim, currency: intent.quote_currency, amountMinor: due }, nowMs);
+  return processEvent(db, cfg, { provider, eventId: `sim:${intentId}`, eventType: 'SIMULATED_CAPTURE', action: 'capture_completed', intentId, providerPaymentId: sim, currency: intent.quote_currency, amountMinor: due, isTest: true }, nowMs);
 }

@@ -17,6 +17,8 @@ export const MODERATION_POLICY_VERSION = 'mod-v1';
 export const ADS_SHARE_BPS = 8000; // 80%
 export const COMMISSION_SHARE_BPS = 500; // 5%
 export const TOP_N = 10;
+/** Largest single bid accepted while PAYMENT_MODE=simulated (USD 1,000), so test bids stay plausible. */
+export const SIMULATED_MAX_RANK_UNITS = 100_000;
 
 export type PaymentMode = 'simulated' | 'sandbox' | 'live';
 export type Currency = 'USD' | 'VND';
@@ -41,7 +43,10 @@ const int = (v: string | undefined, d: number) => {
 
 export function config(env: Env): Config {
   // Live mode needs both PAYMENT_MODE=live and the explicit LIVE_PAYMENTS flag; otherwise it degrades to sandbox.
-  let mode: PaymentMode = env.PAYMENT_MODE === 'live' || env.PAYMENT_MODE === 'sandbox' ? env.PAYMENT_MODE : 'simulated';
+  // Fail closed: an unset mode is simulated, but a typo (e.g. "Live") is a configuration error.
+  const raw = (env.PAYMENT_MODE ?? '').trim();
+  if (raw && raw !== 'simulated' && raw !== 'sandbox' && raw !== 'live') throw new Error(`Invalid PAYMENT_MODE "${raw}": use simulated, sandbox or live`);
+  let mode: PaymentMode = raw === 'live' || raw === 'sandbox' ? raw : 'simulated';
   if (mode === 'live' && env.LIVE_PAYMENTS !== 'true') mode = 'sandbox';
   return {
     paymentMode: mode,

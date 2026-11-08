@@ -44,11 +44,30 @@ function oauthProvider(env: Env) {
 
 const SCOPES = ['bip.products', 'bip.boosts', 'bip.wallet'];
 
-/** Housekeeping, then the 03:12 ICT lock (and catch-up of any missed cutoff). */
+/** Run one housekeeping step; its failure is logged and never blocks the lock. */
+async function isolated(name: string, fn: () => Promise<unknown>) {
+  try {
+    return await fn();
+  } catch (e) {
+    console.error(`${name} failed`, e);
+    return null;
+  }
+}
+
+/**
+ * The 03:12 ICT lock (and catch-up of any missed cutoff) runs first, then housekeeping in pages.
+ * A lock failure is retried by the hourly trigger; housekeeping failures never block the lock.
+ */
 export async function scheduledJob(env: Env, nowMs = Date.now()) {
-  await vestCommissions(env.DB, nowMs);
-  await expireIntents(env.DB, nowMs);
-  return runDueLocks(env.DB, config(env).origin, nowMs);
+  let locks: Awaited<ReturnType<typeof runDueLocks>> = [];
+  try {
+    locks = await runDueLocks(env.DB, config(env).origin, nowMs);
+  } catch (e) {
+    console.error('lock run failed', e);
+  }
+  await isolated('vestCommissions', () => vestCommissions(env.DB, nowMs));
+  await isolated('expireIntents', () => expireIntents(env.DB, nowMs));
+  return locks;
 }
 
 export default {

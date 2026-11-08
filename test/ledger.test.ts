@@ -6,7 +6,7 @@ import { failPayout, preparePayoutBatch, recordManualTransfer, requestPayout, ve
 import { reconcile } from '../src/mcp/operator-server';
 import { newId } from '../src/lib/ids';
 import { DAY_MS } from '../src/lib/time';
-import { E, bid, cfg, db, ledgerBalancedEverywhere, makeProduct, makeUser } from './helpers';
+import { E, bid, cfg, db, ledgerBalancedEverywhere, makeProduct, makeUser, realCfg } from './helpers';
 
 const bal = async (u: string, cur = 'USD') => (await walletBalances(db(), u)).find(b => b.currency === cur);
 
@@ -108,17 +108,34 @@ describe('commission wallet', () => {
     expect(await releaseWallet(db(), intent.id, 'provider failed')).toBe(true);
     expect(await releaseWallet(db(), intent.id, 'retry')).toBe(false);
     expect(await bal(r)).toMatchObject({ available_minor: 500, reserved_for_bid_minor: 0 });
-    // A late settlement after release is refused: the wallet part is no longer reserved.
+    // A late capture after release cannot settle (the wallet part is gone) but is never silently
+    // kept: the intent moves to needs_review and the money is recorded for the operator.
     const s = await settle(db(), cfg(), { intentId: intent.id, provider: 'paypal', providerPaymentId: 'CAP-late', currency: 'USD', cashMinor: 1700, confirmedAtMs: Date.now() });
     expect(s).toEqual({ status: 'rejected', reason: 'wallet_reservation_missing' });
+    expect((await db().prepare('SELECT status FROM bid_intents WHERE id = ?').bind(intent.id).first<{ status: string }>())!.status).toBe('needs_review');
+    const rv = await db().prepare(`SELECT kind, amount_minor, status FROM payment_reviews WHERE bid_intent_id = ?`).bind(intent.id).first();
+    expect(rv).toEqual({ kind: 'capture', amount_minor: 1700, status: 'open' });
+    expect(await db().prepare('SELECT 1 FROM bid_contributions WHERE bid_intent_id = ?').bind(intent.id).first()).toBeNull();
     expect((await reconcile(db())).wallet_drift).toEqual([]);
+  });
+
+  it('wallet funds cannot be applied once checkout started (the provider amount is fixed)', async () => {
+    const r = await fundedWallet();
+    const p = await makeProduct(r, 'Wallet Locked');
+    const { intent } = await quote(db(), cfg(), r, { productId: p, board: 'daily', rankUnits: 2000, currency: 'USD', idempotencyKey: newId('q') });
+    await beginCheckout(db(), cfg(), r, intent.id, 'paypal');
+    await expect(applyWallet(db(), r, intent.id, 300)).rejects.toMatchObject({ code: 'intent_locked' });
+    expect(await bal(r)).toMatchObject({ available_minor: 500, reserved_for_bid_minor: 0 });
+    // The full cash capture still settles normally.
+    const s = await settle(db(), cfg(), { intentId: intent.id, provider: 'paypal', providerPaymentId: 'CAP-' + intent.id, currency: 'USD', cashMinor: 2000, confirmedAtMs: Date.now() });
+    expect(s.status).toBe('settled');
   });
 
   it('A30: concurrent payout request and wallet bid for the same $5 → only one reserves it', async () => {
     const r = await fundedWallet();
     const p = await makeProduct(r, 'Race');
     const { intent } = await quote(db(), cfg(), r, { productId: p, board: 'daily', rankUnits: 500, currency: 'USD', idempotencyKey: newId('q') });
-    const lowMin = { ...cfg(), minPayout: { USD: 100, VND: 1000 } };
+    const lowMin = realCfg();
     const results = await Promise.allSettled([
       applyWallet(db(), r, intent.id, 500),
       requestPayout(db(), lowMin, E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'me@paypal.test', idempotencyKey: newId('p') }),
@@ -139,7 +156,7 @@ describe('manual payouts (01-10 window)', () => {
 
   it('A31: request → batch → transfer recorded only with proof, exact amount, inside 01-10', async () => {
     const r = await fundedWallet();
-    const lowMin = { ...cfg(), minPayout: { USD: 100, VND: 1000 } };
+    const lowMin = realCfg();
     const req = await requestPayout(db(), lowMin, E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 400, payoutMethod: 'bank_transfer', beneficiaryReference: 'VCB 0123456789 NGUYEN A', idempotencyKey: newId('p') }) as { id: string };
     expect(await bal(r)).toMatchObject({ available_minor: 100, reserved_for_payout_minor: 400 });
     // Beneficiary details are encrypted at rest.
@@ -162,8 +179,8 @@ describe('manual payouts (01-10 window)', () => {
 
   it('failed transfer returns funds; minimum payout enforced', async () => {
     const r = await fundedWallet();
-    await expect(requestPayout(db(), cfg(), E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'x@y.z', idempotencyKey: newId('p') })).rejects.toThrow(/Minimum payout/);
-    const lowMin = { ...cfg(), minPayout: { USD: 100, VND: 1000 } };
+    await expect(requestPayout(db(), { ...realCfg(), minPayout: cfg().minPayout }, E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'x@y.z', idempotencyKey: newId('p') })).rejects.toThrow(/Minimum payout/);
+    const lowMin = realCfg();
     const req = await requestPayout(db(), lowMin, E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'x@y.z', idempotencyKey: newId('p') }) as { id: string };
     await failPayout(db(), 'operator:test', req.id, 'BANK_REJECTED');
     await failPayout(db(), 'operator:test', req.id, 'again');

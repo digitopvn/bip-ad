@@ -3,6 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { BOARDS, config, isBoard } from '../domain/config';
+import { resolvePaymentReview } from '../domain/bidding';
 import { DomainError } from '../domain/errors';
 import { decisionStatement } from '../domain/ledger';
 import { moderateProduct } from '../domain/products';
@@ -21,8 +22,12 @@ function cutoffArg(s: string) {
   // 03:12 ICT == 20:12 UTC.
   if (d.getUTCHours() !== 20 || d.getUTCMinutes() !== 12 || d.getUTCSeconds() !== 0 || d.getUTCMilliseconds() !== 0) throw new DomainError('invalid_cutoff', 'cutoff_at must be exactly 03:12:00 ICT (20:12:00Z)');
   if (ms > Date.now()) throw new DomainError('invalid_cutoff', 'cutoff_at is in the future');
+  // A snapshot is "immutable" only if taken near its cutoff: older ones would freeze today's data.
+  if (Date.now() - ms > CATCH_UP_DAYS * 86400_000) throw new DomainError('invalid_cutoff', `cutoff_at is more than ${CATCH_UP_DAYS} days old; backfills are not supported`);
   return ms;
 }
+
+const CATCH_UP_DAYS = 3;
 
 export function operatorMcpServer(env: Env) {
   const db = env.DB;
@@ -86,9 +91,12 @@ export function operatorMcpServer(env: Env) {
     };
     if (!f) throw new DomainError('not_found', 'Flight not found', 404);
     if (!isBoard(a.board) || a.board !== f.board) await deny('CROSS_BOARD_SPEND');
-    if (f.committed_minor + a.amount_minor > f.spend_cap_minor) await deny('EXCEEDS_FLIGHT_CAP');
+    // Cumulative cap, enforced atomically: the commitment is recorded only while it stays within the cap.
+    const r = await db.prepare('UPDATE ad_flights SET committed_minor = committed_minor + ? WHERE id = ? AND committed_minor + ? <= spend_cap_minor')
+      .bind(a.amount_minor, f.id, a.amount_minor).run();
+    if (!r.meta.changes) await deny('EXCEEDS_FLIGHT_CAP');
     await decisionStatement(db, { actor: ACTOR, action: 'ads.execute', decision: 'defer', reasons: ['ADS_ADAPTER_MOCKED'], policy: 'ads-v1', resourceId: f.id, result: { amount: a.amount_minor } }, now).run();
-    return { status: 'mocked', note: 'Within cap. Ads execution is out of scope for this MVP; nothing was spent.' };
+    return { status: 'mocked', committed_minor: f.committed_minor + a.amount_minor, spend_cap_minor: f.spend_cap_minor, note: 'Within cap and committed against it. Ads execution is out of scope for this MVP; nothing was spent.' };
   });
 
   jsonTool(server, 'payouts.prepare_batch', 'Prepare the monthly manual payout batch (lists beneficiaries for the operator). Idempotent per month.', { window_month: z.string().describe('YYYY-MM') }, false,
@@ -100,6 +108,15 @@ export function operatorMcpServer(env: Env) {
 
   jsonTool(server, 'payouts.fail', 'Mark a payout as failed and return funds to the available balance.', { payout_request_id: z.string(), reason: z.string().max(200) }, false,
     async a => failPayout(db, ACTOR, a.payout_request_id, a.reason));
+
+  jsonTool(server, 'payments.reviews', 'Open payment reviews: captures that did not match their intent, captures for closed intents, partial refunds.', { status: z.enum(['open', 'settled', 'dismissed']).optional() }, true, async a => {
+    const { results } = await db.prepare('SELECT * FROM payment_reviews WHERE status = ? ORDER BY created_at LIMIT 200').bind(a.status ?? 'open').all();
+    return { reviews: results };
+  });
+
+  jsonTool(server, 'payments.resolve_review', 'Resolve a payment review: settle (a capture of exactly the full quote) or dismiss (money handled at the provider, e.g. refunded). Logged.', {
+    review_id: z.string(), resolution: z.enum(['settle', 'dismiss']), note: z.string().min(3).max(300),
+  }, false, async a => resolvePaymentReview(db, cfg, ACTOR, a.review_id, a.resolution, a.note));
 
   jsonTool(server, 'finance.reconcile', 'Read-only ledger reconciliation: every transaction balances per currency; wallet projection equals ledger.', {}, true, async () => reconcile(db));
 
@@ -113,18 +130,19 @@ export function operatorMcpServer(env: Env) {
 
 export async function reconcile(db: D1Database) {
   const unbalanced = await db.prepare(`SELECT txn_id, currency, SUM(amount_minor) AS s FROM ledger_entries GROUP BY txn_id, currency HAVING s <> 0 LIMIT 20`).all();
-  const { results: wallets } = await db.prepare('SELECT * FROM wallet_balances').all<{ user_id: string; currency: string; pending_minor: number; available_minor: number; reserved_bid_minor: number; reserved_payout_minor: number }>();
-  const drift = [];
-  for (const w of wallets) {
-    for (const [col, suffix] of [['pending_minor', 'pending'], ['available_minor', 'available'], ['reserved_bid_minor', 'reserved_bid'], ['reserved_payout_minor', 'reserved_payout']] as const) {
-      const s = await db.prepare('SELECT COALESCE(-SUM(amount_minor), 0) AS s FROM ledger_entries WHERE account = ? AND currency = ?').bind(`liability:wallet:${w.user_id}:${suffix}`, w.currency).first<{ s: number }>();
-      if ((s?.s ?? 0) !== w[col]) drift.push({ user_id: w.user_id, currency: w.currency, column: col, projection: w[col], ledger: s?.s ?? 0 });
-    }
-  }
-  const boards = [];
-  for (const b of BOARDS) {
-    const r = await db.prepare(`SELECT currency, -SUM(amount_minor) AS ads_fund FROM ledger_entries WHERE account = ? GROUP BY currency`).bind(`liability:ads_fund:${b}`).all();
-    boards.push({ board: b, ads_fund: r.results });
-  }
-  return { balanced: unbalanced.results.length === 0, unbalanced: unbalanced.results, wallet_drift: drift, ads_funds: boards };
+  // Wallet projection vs ledger in one pass: ledger sums per wallet account, joined to the projection.
+  const { results: drift } = await db.prepare(`WITH l AS (
+      SELECT account, currency, -SUM(amount_minor) AS s FROM ledger_entries WHERE account LIKE 'liability:wallet:%' GROUP BY account, currency
+    ), w AS (
+      SELECT user_id, currency, 'pending' AS k, pending_minor AS v FROM wallet_balances
+      UNION ALL SELECT user_id, currency, 'available', available_minor FROM wallet_balances
+      UNION ALL SELECT user_id, currency, 'reserved_bid', reserved_bid_minor FROM wallet_balances
+      UNION ALL SELECT user_id, currency, 'reserved_payout', reserved_payout_minor FROM wallet_balances
+    )
+    SELECT w.user_id, w.currency, w.k AS column, w.v AS projection, COALESCE(l.s, 0) AS ledger
+    FROM w LEFT JOIN l ON l.account = 'liability:wallet:' || w.user_id || ':' || w.k AND l.currency = w.currency
+    WHERE w.v <> COALESCE(l.s, 0) LIMIT 50`).all();
+  const { results: funds } = await db.prepare(`SELECT account, currency, -SUM(amount_minor) AS balance FROM ledger_entries
+      WHERE account LIKE 'liability:ads_fund:%' OR account LIKE 'asset:cash:%' GROUP BY account, currency ORDER BY account`).all();
+  return { balanced: unbalanced.results.length === 0, unbalanced: unbalanced.results, wallet_drift: drift, accounts: funds, boards: BOARDS };
 }

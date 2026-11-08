@@ -5,7 +5,7 @@ import { newId } from '../lib/ids';
 import { DAY_MS, cutoffAtOrBefore, ictDate, iso } from '../lib/time';
 import { type Board, BOARD_DAYS, BOARDS, METRIC_WINDOW_MS, RANKING_POLICY_VERSION, TOP_N } from './config';
 import { isConstraintError } from './errors';
-import { acct, outboxStatement, postingStatements } from './ledger';
+import { acct, guardStatement, outboxStatement, postingStatements } from './ledger';
 import { loadStandings } from './ranking';
 
 export const MEDIA_PLATFORMS = ['x', 'facebook', 'youtube'] as const;
@@ -43,15 +43,25 @@ export async function freezeBoard(db: D1Database, board: Board, cutoffMs: number
 /**
  * Finalize the revenue cohort of (board, cutoff): contributions confirmed after the previous
  * cutoff and before this one, each allocated exactly once (UNIQUE bid_contribution_id). Old
- * contributions that are still active never fund a new cohort (A09).
+ * contributions that are still active never fund a new cohort (A09). A straggler whose settlement
+ * committed after its own cohort was finalized is swept into the next cohort (assigned <= cutoff).
+ * Each included contribution is guarded as still active, so a concurrent refund forces a retry.
  */
 export async function finalizeCohort(db: D1Database, board: Board, cutoffMs: number, nowMs = Date.now()) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const r = await tryFinalizeCohort(db, board, cutoffMs, nowMs);
+    if (r) return r;
+  }
+  throw new Error(`cohort ${board} ${iso(cutoffMs)} kept conflicting; retry later`);
+}
+
+async function tryFinalizeCohort(db: D1Database, board: Board, cutoffMs: number, nowMs: number) {
   const cutoff = iso(cutoffMs);
   const done = await db.prepare('SELECT id, currency FROM revenue_cohorts WHERE board = ? AND cutoff_at = ?').bind(board, cutoff).all<{ id: string; currency: string }>();
   if (done.results.length) return { created: false, cohorts: done.results.map(r => r.id) };
   const { results } = await db.prepare(`SELECT c.id, c.currency, c.gross_minor, c.ads_minor, c.commission_minor, c.platform_minor, p.wallet_minor
       FROM bid_contributions c JOIN payments p ON p.bid_intent_id = c.bid_intent_id
-      WHERE c.board = ? AND c.assigned_cutoff_at = ? AND c.status = 'active'
+      WHERE c.board = ? AND c.assigned_cutoff_at <= ? AND c.status = 'active'
         AND NOT EXISTS (SELECT 1 FROM revenue_cohort_contributions rc WHERE rc.bid_contribution_id = c.id)`).bind(board, cutoff)
     .all<{ id: string; currency: string; gross_minor: number; ads_minor: number; commission_minor: number; platform_minor: number; wallet_minor: number }>();
 
@@ -72,8 +82,11 @@ export async function finalizeCohort(db: D1Database, board: Board, cutoffMs: num
       db.prepare(`INSERT INTO revenue_cohorts (id, board, cutoff_at, currency, eligible_revenue_minor, external_cash_minor, wallet_funded_minor,
           ads_fund_minor, referral_commission_minor, operator_allocation_minor, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'finalized', ?)`)
         .bind(cohortId, board, cutoff, currency, gross, gross - wallet, wallet, ads, com, plat, now),
-      ...rows.map(r => db.prepare(`INSERT INTO revenue_cohort_contributions (cohort_id, bid_contribution_id, allocated_amount_minor, ads_minor) VALUES (?, ?, ?, ?)`)
-        .bind(cohortId, r.id, r.gross_minor, r.ads_minor)),
+      ...rows.flatMap(r => [
+        db.prepare(`INSERT INTO revenue_cohort_contributions (cohort_id, bid_contribution_id, allocated_amount_minor, ads_minor) VALUES (?, ?, ?, ?)`)
+          .bind(cohortId, r.id, r.gross_minor, r.ads_minor),
+        guardStatement(db, `EXISTS (SELECT 1 FROM bid_contributions WHERE id = ? AND status = 'active')`, r.id),
+      ]),
       outboxStatement(db, 'RevenueCohortFinalized', cohortId, { board, cutoffAt: cutoff, currency, gross, ads }, now),
     );
     if (ads > 0) {
@@ -96,7 +109,9 @@ export async function finalizeCohort(db: D1Database, board: Board, cutoffMs: num
     return { created: true, cohorts: ids };
   } catch (e) {
     if (!isConstraintError(e)) throw e;
-    return { created: false, cohorts: [] };
+    // Only "another run created it" is success; a refund that won a race means read again.
+    const raced = await db.prepare('SELECT id FROM revenue_cohorts WHERE board = ? AND cutoff_at = ?').bind(board, cutoff).all<{ id: string }>();
+    return raced.results.length ? { created: false, cohorts: raced.results.map(r => r.id) } : null;
   }
 }
 

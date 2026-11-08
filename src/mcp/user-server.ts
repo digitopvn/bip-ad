@@ -28,6 +28,7 @@ export function userMcpServer(env: Env, userId: string) {
   const productView = (p: Awaited<ReturnType<typeof getProduct>>) => p && ({
     product_id: p.id, slug: p.slug, name: p.name, tagline: p.tagline, website_url: p.website_url, image_url: p.image_url,
     status: p.status, version: p.version, page_version_id: p.current_page_version_id, published_at: p.published_at,
+    pending_review: { fields: !!p.pending_edit_json, page_version_id: p.pending_page_version_id },
     public_url: `${cfg.origin}/p/${p.slug}`,
   });
 
@@ -35,9 +36,9 @@ export function userMcpServer(env: Env, userId: string) {
     name: z.string().max(80), tagline: z.string().max(160), website_url: z.string().url(), slug: z.string().max(48).optional(), image_url: z.string().url().optional(), idempotency_key: idem,
   }, false, async a => productView(await createProduct(db, userId, a, a.idempotency_key)));
 
-  jsonTool(server, 'products.update', 'Edit a product you own. Pass resource_version (the product version you read) for optimistic concurrency.', {
+  jsonTool(server, 'products.update', 'Edit a product you own. Pass resource_version (the product version you read) for optimistic concurrency. Edits to a published product go live after moderation (see pending_review).', {
     product_id: z.string(), name: z.string().max(80).optional(), tagline: z.string().max(160).optional(), website_url: z.string().url().optional(), image_url: z.string().url().nullable().optional(), resource_version: z.number().int().optional(),
-  }, false, async a => productView(await updateProduct(db, userId, a.product_id, { name: a.name, tagline: a.tagline, website_url: a.website_url, image_url: a.image_url ?? (a.image_url === null ? '' : undefined) }, a.resource_version)));
+  }, false, async a => productView(await updateProduct(db, cfg, userId, a.product_id, { name: a.name, tagline: a.tagline, website_url: a.website_url, image_url: a.image_url ?? (a.image_url === null ? '' : undefined) }, a.resource_version)));
 
   jsonTool(server, 'products.submit', 'Submit a product for moderation and publication. Requires page blocks.', { product_id: z.string() }, false,
     async a => productView(await submitProduct(db, cfg, userId, a.product_id)));
@@ -63,11 +64,11 @@ export function userMcpServer(env: Env, userId: string) {
     return { version: row.version, moderation_status: row.moderation_status, preview_url: `${cfg.origin}/p/${p.slug}?preview=${row.version}`, issues: [] };
   });
 
-  jsonTool(server, 'pages.publish', 'Publish a page version (latest when version is omitted). The public page shows it once the product is published.', { product_id: z.string(), version: z.number().int().optional() }, false, async a => {
-    const r = await publishPage(db, userId, a.product_id, a.version);
+  jsonTool(server, 'pages.publish', 'Publish a page version (latest when version is omitted). On a published product the new version goes live after moderation; pending_review tells you if it is waiting.', { product_id: z.string(), version: z.number().int().optional() }, false, async a => {
+    const r = await publishPage(db, cfg, userId, a.product_id, a.version);
     if (!r.ok) return { ok: false, issues: r.issues };
     const p = (await getProduct(db, a.product_id))!;
-    return { ok: true, page_version_id: r.pageVersionId, version: r.version, product_status: r.productStatus, public_url: `${cfg.origin}/p/${p.slug}` };
+    return { ok: true, page_version_id: r.pageVersionId, version: r.version, product_status: r.productStatus, pending_review: r.pendingReview, reasons: r.reasons, public_url: `${cfg.origin}/p/${p.slug}` };
   });
 
   jsonTool(server, 'boards.get', 'Live leaderboard for a board with the next 03:12 ICT cutoff. Ranking: active bid DESC, then owner successful referrals, valid clicks, valid views.', { board, limit: z.number().int().min(1).max(100).optional() }, true, async a => {
@@ -80,9 +81,9 @@ export function userMcpServer(env: Env, userId: string) {
     };
   });
 
-  jsonTool(server, 'boosts.quote', 'Quote a bid increment for one of your published products. Locks price and FX for the quote TTL. Does not charge or rank anything.', {
+  jsonTool(server, 'boosts.quote', 'Quote a bid increment for one of your published products. Locks price and FX for the quote TTL. Does not charge or rank anything. Reusing an idempotency_key with different parameters is a 409.', {
     product_id: z.string(), board, increment_rank_units: z.number().int().describe('USD cents equivalent, e.g. 1000 = $10'), currency: z.enum(['USD', 'VND']).describe('USD pays via PayPal, VND via SePay VietQR'), idempotency_key: idem,
-  }, true, async a => {
+  }, false, async a => {
     const { intent, projectedRank } = await quote(db, cfg, userId, { productId: a.product_id, board: a.board, rankUnits: a.increment_rank_units, currency: a.currency, idempotencyKey: a.idempotency_key });
     return {
       intent_id: intent.id, status: intent.status, board: intent.board, increment_rank_units: intent.rank_units,
@@ -92,7 +93,7 @@ export function userMcpServer(env: Env, userId: string) {
     };
   });
 
-  jsonTool(server, 'boosts.checkout', 'Create a checkout for a quote. Returns a URL the human must open to approve and pay. Optionally reserve commission-wallet funds first. Rank changes only after the payment is verified.', {
+  jsonTool(server, 'boosts.checkout', 'Create a checkout for a quote. Returns a URL the human must open to approve and pay. To use commission-wallet funds, pass wallet_amount_minor here or call wallet.apply_to_bid before the first checkout; the split is fixed once checkout starts. Rank changes only after the payment is verified.', {
     intent_id: z.string(), provider: z.enum(['paypal', 'sepay', 'wallet']), wallet_amount_minor: z.number().int().min(0).optional(),
   }, false, async a => {
     const r = await beginCheckout(db, cfg, userId, a.intent_id, a.provider, { walletMinor: a.wallet_amount_minor });
@@ -111,14 +112,14 @@ export function userMcpServer(env: Env, userId: string) {
 
   jsonTool(server, 'wallet.balance', 'Commission wallet balances (pending, available, reserved, paid) per currency.', {}, true, async () => ({ balances: await walletBalances(db, userId) }));
 
-  jsonTool(server, 'wallet.apply_to_bid', 'Reserve available commission balance for a bid intent. Consumed only when the bid settles; released if the checkout expires or fails.', {
+  jsonTool(server, 'wallet.apply_to_bid', 'Reserve available commission balance for a fresh quote (before boosts.checkout). Consumed only when the bid settles; released if the quote expires or the payment needs review.', {
     intent_id: z.string(), amount_minor: z.number().int().positive(),
   }, false, async a => {
     const i = await applyWallet(db, userId, a.intent_id, a.amount_minor);
     return { intent_id: i.id, wallet_applied_minor: i.wallet_applied_minor, due_minor: i.quote_minor - i.wallet_applied_minor, currency: i.quote_currency };
   });
 
-  jsonTool(server, 'payouts.request', 'Request a payout of available commission. Funds are reserved now and transferred manually on days 01-10 of the month.', {
+  jsonTool(server, 'payouts.request', 'Request a payout of available commission earned from real payments. Funds are reserved now and transferred manually on days 01-10 of the month. Disabled while payments are simulated.', {
     currency: z.enum(['USD', 'VND']), amount_minor: z.number().int().positive(), payout_method: z.enum(['bank_transfer', 'paypal']), beneficiary_reference: z.string().min(4).max(200).describe('Where to send the money (stored encrypted)'), idempotency_key: idem,
   }, false, async a => requestPayout(db, cfg, env.SESSION_SECRET, userId, { currency: a.currency, amountMinor: a.amount_minor, payoutMethod: a.payout_method, beneficiaryReference: a.beneficiary_reference, idempotencyKey: a.idempotency_key }));
 

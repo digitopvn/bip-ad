@@ -29,7 +29,7 @@ import { checkoutPage } from './views/checkout';
 import { errorPage } from './views/error';
 import { homePage } from './views/home';
 import { escapeHtml } from './views/html';
-import { loginPage } from './views/login';
+import { loginPage, safeNext } from './views/login';
 import { productPage } from './views/product';
 import { snapshotPage } from './views/snapshot';
 
@@ -51,7 +51,6 @@ app.use('*', secureHeaders({
   crossOriginEmbedderPolicy: false,
 }));
 
-const safeNext = (n: string | undefined) => (n && n.startsWith('/') && !n.startsWith('//') && !n.includes('\\') ? n : '/account');
 
 async function viewer(c: C) {
   const s = await getSession(c);
@@ -89,7 +88,7 @@ app.get('/p/:slug', async c => {
   const isOwner = !!user && user.id === p.owner_id;
   const preview = Number(c.req.query('preview')) || null;
   if ((p.status !== 'published' || preview) && !isOwner) return notFoundPage(c, 'No product with that address.');
-  if (!isOwner && p.status === 'published') await measure(c, p.id, c.req.query('src') === 'card' ? ['product_page_view', 'product_card_click'] : ['product_page_view']);
+  if (!isOwner && p.status === 'published') await measure(c, p.id, c.req.query('src') === 'card' && sameSiteReferer(c) ? ['product_page_view', 'product_card_click'] : ['product_page_view']);
   const v = await productView(c.env, p, preview);
   return page(c, `${p.name} — bip.ad`, ctx => productPage(ctx, v), 200, p.tagline);
 });
@@ -197,8 +196,8 @@ app.get('/checkout/:id/paypal-return', async c => {
   // The redirect alone proves nothing (A06); capture server-to-server and settle from PayPal's answer.
   const cap = await captureOrder(c.env, token);
   if (cap.capture?.status === 'COMPLETED' && cap.capture.custom_id === id) {
-    await processEvent(c.env.DB, cfg, normalizePayPal({ id: `capture:${cap.capture.id}`, event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: cap.capture.id, status: 'COMPLETED', custom_id: id, amount: cap.capture.amount } }));
-    return c.redirect(`/checkout/${id}?r=paid`, 303);
+    const r = await processEvent(c.env.DB, cfg, normalizePayPal({ id: `capture:${cap.capture.id}`, event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: cap.capture.id, status: 'COMPLETED', custom_id: id, amount: cap.capture.amount } }));
+    return c.redirect(`/checkout/${id}?r=${r.status === 'settled' || r.status === 'duplicate' || r.status === 'replayed' ? 'paid' : 'success'}`, 303);
   }
   return c.redirect(`/checkout/${id}?r=success`, 303);
 });
@@ -216,51 +215,70 @@ app.get('/auth/:provider/start', async c => {
   const provider = c.req.param('provider');
   if (provider !== 'github' && provider !== 'google') return notFoundPage(c);
   const state = randomToken(24);
-  const reqKey = c.req.query('req');
-  await c.env.OAUTH_KV.put(`oauthstate:${state}`, JSON.stringify({ next: safeNext(c.req.query('next')), mcpReq: reqKey && /^[A-Za-z0-9_-]{20,64}$/.test(reqKey) ? reqKey : null }), { expirationTtl: 600 });
+  await c.env.OAUTH_KV.put(`oauthstate:${state}`, JSON.stringify({ next: safeNext(c.req.query('next')) }), { expirationTtl: 600 });
   setCookie(c, 'bip_oauth_state', state, { path: '/auth', httpOnly: true, secure: new URL(c.req.url).protocol === 'https:', sameSite: 'Lax', maxAge: 600 });
   return c.redirect(authorizeUrl(c.env, config(c.env).origin, provider, state), 302);
 });
 
-app.get('/auth/:provider/callback', async c => {
-  const provider = c.req.param('provider') as UpstreamProvider;
-  if (provider !== 'github' && provider !== 'google') return notFoundPage(c);
-  const state = c.req.query('state') ?? '';
-  const code = c.req.query('code');
-  const cookieState = getCookie(c, 'bip_oauth_state');
-  deleteCookie(c, 'bip_oauth_state', { path: '/auth' });
-  const stored = state ? await c.env.OAUTH_KV.get<{ next: string; mcpReq: string | null }>(`oauthstate:${state}`, 'json') : null;
-  if (!code || !stored || !cookieState || !safeEqual(cookieState, state)) return c.redirect('/login?error=state', 302);
-  await c.env.OAUTH_KV.delete(`oauthstate:${state}`);
-  let ident;
-  try {
-    ident = await exchange(c.env, config(c.env).origin, provider, code);
-  } catch (e) {
-    console.error('oauth exchange failed', e);
-    return c.redirect('/login?error=exchange', 302);
-  }
+/** Sign the upstream identity in: find or create the account, attribute a referral once, open a web session. */
+async function signIn(c: C, provider: UpstreamProvider, code: string) {
+  const ident = await exchange(c.env, config(c.env).origin, provider, code);
   const { user, created } = await upsertUser(c.env.DB, ident);
-  if (user.status !== 'active') return page(c, 'Account suspended', ctx => errorPage(ctx, 403, 'This account is suspended.'), 403);
+  if (user.status !== 'active') return null;
   if (created) {
     const ref = await readReferralCookie(c);
     if (ref) await attributeSignup(c.env.DB, config(c.env), user.id, ref.code, ref.clickedAtMs);
   }
   clearReferralCookie(c);
   await createSession(c, user.id);
-  if (stored.mcpReq) {
-    const reqInfo = await c.env.OAUTH_KV.get(`mcpreq:${stored.mcpReq}`, 'json');
-    if (!reqInfo) return c.redirect('/login?error=expired', 302);
-    await c.env.OAUTH_KV.delete(`mcpreq:${stored.mcpReq}`);
-    const info = reqInfo as Parameters<Env['OAUTH_PROVIDER']['completeAuthorization']>[0]['request'];
-    const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
-      request: info, userId: user.id, metadata: { label: user.display_name }, scope: info.scope, props: { userId: user.id },
-    });
-    return c.redirect(redirectTo, 302);
+  return user;
+}
+
+async function signInOrFail(c: C, provider: UpstreamProvider, code: string) {
+  try {
+    const user = await signIn(c, provider, code);
+    return user ? { user } : { fail: await page(c, 'Account suspended', ctx => errorPage(ctx, 403, 'This account is suspended.'), 403) };
+  } catch (e) {
+    console.error('oauth exchange failed', e);
+    return { fail: c.redirect('/login?error=exchange', 302) };
   }
-  return c.redirect(stored.next, 302);
+}
+
+app.get('/auth/:provider/callback', async c => {
+  const provider = c.req.param('provider') as UpstreamProvider;
+  if (provider !== 'github' && provider !== 'google') return notFoundPage(c);
+  const state = c.req.query('state') ?? '';
+  const code = c.req.query('code');
+  const web = state ? await c.env.OAUTH_KV.get<{ next: string }>(`oauthstate:${state}`, 'json') : null;
+  if (web) {
+    // Web sign-in: our own state, bound to this browser by the bip_oauth_state cookie.
+    const cookieState = getCookie(c, 'bip_oauth_state');
+    deleteCookie(c, 'bip_oauth_state', { path: '/auth' });
+    if (!code || !cookieState || !safeEqual(cookieState, state)) return c.redirect('/login?error=state', 302);
+    await c.env.OAUTH_KV.delete(`oauthstate:${state}`);
+    const r = await signInOrFail(c, provider, code);
+    if ('fail' in r) return r.fail;
+    return c.redirect(safeNext(web.next), 302);
+  }
+  // MCP grant: consent was approved on POST /authorize; the provider binds this state to the browser.
+  let resumed;
+  try {
+    resumed = await c.env.OAUTH_PROVIDER.finishUpstream<{ provider: UpstreamProvider }>(c.req.raw);
+  } catch {
+    return c.redirect('/login?error=state', 302);
+  }
+  if (!code || resumed.data?.provider !== provider) return c.redirect('/login?error=state', 302);
+  const r = await signInOrFail(c, provider, code);
+  if ('fail' in r) return r.fail;
+  const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
+    request: resumed.request, userId: r.user.id, metadata: { label: r.user.display_name }, scope: resumed.request.scope, props: { userId: r.user.id },
+  });
+  const res = c.redirect(redirectTo, 302);
+  resumed.headers.forEach((v, k) => { if (k.toLowerCase() !== 'location') res.headers.append(k, v); });
+  return res;
 });
 
-// MCP OAuth consent: the client is identified, the user signs in upstream, then the grant is completed.
+// MCP OAuth consent: show who is asking and where tokens go, then an explicit, browser-bound Approve.
 app.get('/authorize', async c => {
   let info;
   try {
@@ -268,15 +286,39 @@ app.get('/authorize', async c => {
   } catch {
     return page(c, 'Invalid request', ctx => errorPage(ctx, 400, 'The authorization request is invalid.'), 400);
   }
-  const client = await c.env.OAUTH_PROVIDER.lookupClient(info.clientId);
-  if (!client) return page(c, 'Unknown client', ctx => errorPage(ctx, 400, 'Unknown OAuth client.'), 400);
-  const key = randomToken(24);
-  await c.env.OAUTH_KV.put(`mcpreq:${key}`, JSON.stringify(info), { expirationTtl: 600 });
-  return page(c, 'Connect your agent — bip.ad', ctx => authorizePage(ctx, {
-    clientName: client.clientName || client.clientId,
-    scopes: info.scope,
-    startUrls: { github: `/auth/github/start?req=${key}`, google: `/auth/google/start?req=${key}` },
+  let d;
+  try {
+    d = await c.env.OAUTH_PROVIDER.describeConsent(info);
+  } catch {
+    return page(c, 'Unknown client', ctx => errorPage(ctx, 400, 'Unknown OAuth client.'), 400);
+  }
+  const tx = await c.env.OAUTH_PROVIDER.beginConsent(info);
+  const res = await page(c, 'Connect your agent — bip.ad', ctx => authorizePage(ctx, {
+    clientName: d.clientName, clientDomain: d.clientDomain, redirectHost: d.redirectHost, redirectIsLoopback: d.redirectIsLoopback, scopes: d.scope, handle: tx.handle,
   }));
+  tx.headers.forEach((v, k) => res.headers.append(k, v));
+  return res;
+});
+
+app.post('/authorize', async c => {
+  const form = await c.req.parseBody();
+  const handle = typeof form.handle === 'string' ? form.handle : '';
+  try {
+    if (form.action === 'deny') {
+      const denied = await c.env.OAUTH_PROVIDER.denyConsent(c.req.raw, handle);
+      return new Response(null, { status: 302, headers: denied.headers });
+    }
+    const provider = form.provider;
+    if (provider !== 'github' && provider !== 'google') return page(c, 'Invalid request', ctx => errorPage(ctx, 400, 'Choose GitHub or Google.'), 400);
+    const approved = await c.env.OAUTH_PROVIDER.approveConsent(c.req.raw, handle);
+    // beginUpstream appends its binding cookie to the approval's headers.
+    const up = await c.env.OAUTH_PROVIDER.beginUpstream(approved.request, { data: { provider }, headers: approved.headers });
+    up.headers.set('location', authorizeUrl(c.env, config(c.env).origin, provider, up.state));
+    return new Response(null, { status: 302, headers: up.headers });
+  } catch (e) {
+    console.error('consent failed', e);
+    return page(c, 'Consent expired', ctx => errorPage(ctx, 400, 'This approval expired or was already used. Start the connection again from your agent.'), 400);
+  }
 });
 
 // ---------- JSON API (read-only), measurement, webhooks ----------
@@ -284,8 +326,15 @@ app.get('/authorize', async c => {
 app.get('/api/boards/:board', async c => {
   const board = c.req.param('board');
   if (!isBoard(board)) return c.json({ error: 'unknown board' }, 404);
+  // Polled by every open board tab: serve a shared 15 s edge-cached copy instead of re-ranking per request.
+  const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
+  const key = new Request(new URL(`/api/boards/${board}`, c.req.url).toString());
+  const hit = await cache?.match(key);
+  if (hit) return hit;
   const { view } = await boardView(c.env, board);
-  return c.json(view, 200, { 'cache-control': 'no-store' });
+  const res = c.json(view, 200, { 'cache-control': 'public, max-age=15' });
+  if (cache) c.executionCtx.waitUntil(cache.put(key, res.clone()));
+  return res;
 });
 
 app.post('/api/events', async c => {
@@ -302,12 +351,21 @@ app.post('/api/events', async c => {
   return c.body(null, 204);
 });
 
+/** A card click counts only when the browser came from one of our own pages. */
+function sameSiteReferer(c: C) {
+  try {
+    return new URL(c.req.header('referer') ?? '').origin === new URL(c.req.url).origin;
+  } catch {
+    return false;
+  }
+}
+
 async function measure(c: C, productId: string, types: ('product_card_impression' | 'product_card_click' | 'product_page_view' | 'outbound_click')[]) {
   const ua = c.req.header('user-agent') ?? '';
   if (isLikelyBot(ua)) return;
   const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
   const now = Date.now();
-  const visitor = await visitorHash(c.env.SESSION_SECRET, ip, ua, now);
+  const visitor = await visitorHash(c.env.SESSION_SECRET, ip, now);
   for (const type of types) await recordEvent(c.env.DB, { productId, type, visitor, source: 'web', nowMs: now }).catch(e => console.error('measure failed', e));
 }
 
@@ -317,7 +375,8 @@ app.post('/api/webhooks/paypal', async c => {
   const event = cfg.paymentMode === 'simulated' ? null : await verifyWebhook(c.env, c.req.raw.headers, raw).catch(() => null);
   if (!event) return c.json({ error: 'signature verification failed' }, 401);
   const r = await processEvent(c.env.DB, cfg, normalizePayPal(event));
-  return c.json({ ok: true, status: r.status });
+  // A non-2xx answer makes PayPal redeliver: used for failures and out-of-order reversals.
+  return c.json({ ok: !r.retry, status: r.status }, r.retry ? 503 : 200);
 });
 
 app.post('/api/webhooks/sepay', async c => {
@@ -326,7 +385,7 @@ app.post('/api/webhooks/sepay', async c => {
   const ipn = cfg.paymentMode === 'simulated' ? null : verifyIpn(c.env, c.req.raw.headers, raw);
   if (!ipn) return c.json({ success: false }, 401);
   const r = await processEvent(c.env.DB, cfg, normalizeSePay(ipn));
-  return c.json({ success: true, status: r.status });
+  return c.json({ success: !r.retry, status: r.status }, r.retry ? 503 : 200);
 });
 
 // ---------- Operator MCP (separate identity) ----------

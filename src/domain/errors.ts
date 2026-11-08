@@ -9,3 +9,7 @@ export const notFound = (msg = 'Not found') => new DomainError('not_found', msg,
 /** D1 surfaces SQLite constraint failures as errors whose message names the constraint. */
 export const isConstraintError = (e: unknown) =>
   e instanceof Error && /UNIQUE constraint|CHECK constraint|constraint failed|SQLITE_CONSTRAINT/i.test(`${e.message} ${String((e as { cause?: unknown }).cause ?? '')}`);
+
+/** A guardStatement() condition was false: a state transition the batch depended on lost a race. */
+export const isGuardError = (e: unknown) =>
+  e instanceof Error && /batch_guards/i.test(`${e.message} ${String((e as { cause?: unknown }).cause ?? '')}`);

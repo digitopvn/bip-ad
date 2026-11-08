@@ -25,7 +25,7 @@ Add the MCP server `https://<your-host>/mcp` to Claude, ChatGPT or any MCP clien
 | `payouts.request` / `payouts.status` | Request a manual payout of available commission. |
 | `analytics.product` | Valid views, clicks and standings for a product. |
 
-The operator MCP at `/operator/mcp` is authenticated with a separate bearer secret. It covers moderation, `boards.freeze`, `locks.run`, cohorts, payout batches, recording manual transfers, `finance.reconcile`, and the mock media and ads tools.
+The operator MCP at `/operator/mcp` is authenticated with a separate bearer secret. It covers moderation, `boards.freeze`, `locks.run`, cohorts, payment reviews (`payments.reviews`, `payments.resolve_review`), payout batches, recording manual transfers, `finance.reconcile`, and the mock media and ads tools.
 
 ## Develop
 ```bash

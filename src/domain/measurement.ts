@@ -9,9 +9,13 @@ const BOT_UA = /bot|crawl|spider|slurp|preview|facebookexternalhit|headless|ligh
 
 export const isLikelyBot = (ua: string | null | undefined) => !ua || ua.length < 20 || BOT_UA.test(ua);
 
-export async function visitorHash(secret: string, ip: string, ua: string, nowMs: number) {
-  // Daily salt: visitors cannot be linked across days from the stored hash.
-  return (await sha256Hex(`${secret}|${ictDate(nowMs)}|${ip}|${ua}`)).slice(0, 32);
+/**
+ * One visitor per network address per ICT day. The User-Agent is deliberately not part of the key:
+ * rotating it from one address must not mint new "unique" visitors (tie-breakers are rankable).
+ * Daily salt: visitors cannot be linked across days from the stored hash.
+ */
+export async function visitorHash(secret: string, ip: string, nowMs: number) {
+  return (await sha256Hex(`${secret}|${ictDate(nowMs)}|${ip}`)).slice(0, 32);
 }
 
 export async function recordEvent(db: D1Database, e: { productId: string; type: MeasureType; visitor: string; source: string; nowMs?: number }) {

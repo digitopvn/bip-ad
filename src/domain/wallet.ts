@@ -4,7 +4,7 @@ import { decryptField, encryptField } from '../lib/crypto';
 import { ictDate, iso } from '../lib/time';
 import { type Config, type Currency, REFERRAL_POLICY_VERSION } from './config';
 import { DomainError, isConstraintError, notFound } from './errors';
-import { acct, decisionStatement, outboxStatement, postingStatements, walletStatements } from './ledger';
+import { acct, decisionStatement, guardStatement, outboxStatement, postingStatements, walletStatements } from './ledger';
 
 export async function walletBalances(db: D1Database, userId: string) {
   const { results } = await db.prepare('SELECT * FROM wallet_balances WHERE user_id = ? ORDER BY currency').bind(userId).all<{
@@ -22,10 +22,10 @@ export async function walletBalances(db: D1Database, userId: string) {
 }
 
 /** Move commissions whose hold period ended from pending to available (and count the referral as successful). */
-export async function vestCommissions(db: D1Database, nowMs = Date.now()) {
+export async function vestCommissions(db: D1Database, nowMs = Date.now(), limit = 100) {
   const now = iso(nowMs);
   const { results } = await db.prepare(`SELECT c.id, c.referrer_user_id, c.currency, c.commission_minor, c.successful_referral_id, c.vest_at
-      FROM referral_commissions c WHERE c.state = 'pending' AND c.vest_at <= ?`).bind(now).all<{
+      FROM referral_commissions c WHERE c.state = 'pending' AND c.vest_at <= ? ORDER BY c.vest_at LIMIT ?`).bind(now, limit).all<{
     id: string; referrer_user_id: string; currency: string; commission_minor: number; successful_referral_id: string; vest_at: string;
   }>();
   let vested = 0;
@@ -33,6 +33,8 @@ export async function vestCommissions(db: D1Database, nowMs = Date.now()) {
     try {
       await db.batch([
         db.prepare(`UPDATE referral_commissions SET state = 'available' WHERE id = ? AND state = 'pending'`).bind(c.id),
+        // A commission clawed back since the SELECT must not become spendable: abort the batch.
+        guardStatement(db, `EXISTS (SELECT 1 FROM referral_commissions WHERE id = ? AND state = 'available')`, c.id),
         // vested_at is the policy instant, not the job time, so standings at any cutoff are reproducible.
         db.prepare(`UPDATE successful_referrals SET status = 'vested', vested_at = ? WHERE id = ? AND status = 'pending'`).bind(c.vest_at, c.successful_referral_id),
         ...postingStatements(db, { kind: 'commission_vest', referenceId: c.id, memo: `Commission ${c.id} available`, entries: [
@@ -69,6 +71,13 @@ export async function requestPayout(db: D1Database, cfg: Config, secret: string,
   if (!Number.isSafeInteger(p.amountMinor) || p.amountMinor < cfg.minPayout[p.currency]) {
     throw new DomainError('below_minimum_payout', `Minimum payout is ${cfg.minPayout[p.currency]} ${p.currency} minor units`);
   }
+  // Simulated money never becomes a real payout: no payouts in simulated mode, and test
+  // commissions are excluded from the payable balance in every mode.
+  if (cfg.paymentMode === 'simulated') throw new DomainError('payouts_disabled', 'Payouts are disabled while payments run in simulated mode', 409);
+  const bal = await db.prepare(`SELECT b.available_minor - COALESCE((SELECT SUM(c.commission_minor) FROM referral_commissions c
+      WHERE c.referrer_user_id = b.user_id AND c.currency = b.currency AND c.is_test = 1 AND c.state = 'available'), 0) AS payable
+      FROM wallet_balances b WHERE b.user_id = ? AND b.currency = ?`).bind(userId, p.currency).first<{ payable: number }>();
+  if ((bal?.payable ?? 0) < p.amountMinor) throw new DomainError('insufficient_wallet', 'Not enough available commission balance from real payments', 409);
   const ref = p.beneficiaryReference.trim();
   if (ref.length < 4 || ref.length > 200) throw new DomainError('invalid_beneficiary', 'beneficiary_reference must be 4-200 characters');
   const now = iso(nowMs);
@@ -193,7 +202,8 @@ export async function failPayout(db: D1Database, actor: string, payoutRequestId:
   try {
     await db.batch([
       db.prepare(`INSERT INTO reservation_closures (reservation_id, outcome, closed_at) VALUES (?, 'failed', ?)`).bind(res.id, now),
-      db.prepare(`UPDATE payout_requests SET state = 'failed', updated_at = ? WHERE id = ?`).bind(now, req.id),
+      db.prepare(`UPDATE payout_requests SET state = 'failed', updated_at = ? WHERE id = ? AND state IN ('requested', 'batched')`).bind(now, req.id),
+      guardStatement(db, `EXISTS (SELECT 1 FROM payout_requests WHERE id = ? AND state = 'failed')`, req.id),
       ...postingStatements(db, { kind: 'payout_failed', referenceId: req.id, memo: `Payout failed: ${reason}`, entries: [
         { account: acct.walletReservedPayout(req.user_id), currency: req.currency, amount: req.requested_minor },
         { account: acct.walletAvailable(req.user_id), currency: req.currency, amount: -req.requested_minor },
@@ -203,6 +213,9 @@ export async function failPayout(db: D1Database, actor: string, payoutRequestId:
     ]);
   } catch (e) {
     if (!isConstraintError(e)) throw e;
+    // Lost a race (e.g. the transfer was recorded meanwhile): report the real state.
+    const now2 = await db.prepare('SELECT state FROM payout_requests WHERE id = ?').bind(req.id).first<{ state: string }>();
+    return { status: now2?.state ?? 'unknown' };
   }
   return { status: 'failed' };
 }

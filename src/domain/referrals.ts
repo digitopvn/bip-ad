@@ -77,15 +77,15 @@ export async function referralQualification(db: D1Database, buyerId: string, cas
   return { attributionId: row.id, referrerUserId: row.referrer_user_id, commissionMinor: Math.floor((cashMinor * COMMISSION_SHARE_BPS) / 10000) };
 }
 
-export function qualificationStatements(db: D1Database, cfg: Config, q: ReferralQualification, buyerId: string, intentId: string, currency: string, cashMinor: number, confirmedMs: number) {
+export function qualificationStatements(db: D1Database, cfg: Config, q: ReferralQualification, buyerId: string, intentId: string, currency: string, cashMinor: number, confirmedMs: number, isTest = false) {
   const srId = newId('srf');
   const vestAt = iso(confirmedMs + cfg.referralHoldMs);
   const now = iso(confirmedMs);
   return [
     db.prepare(`INSERT INTO successful_referrals (id, attribution_id, referrer_user_id, referred_user_id, first_qualifying_bid_intent_id, qualified_at, vest_at, status, policy_version)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`).bind(srId, q.attributionId, q.referrerUserId, buyerId, intentId, now, vestAt, REFERRAL_POLICY_VERSION),
-    db.prepare(`INSERT INTO referral_commissions (id, successful_referral_id, qualifying_bid_intent_id, referrer_user_id, currency, eligible_base_minor, commission_minor, state, vest_at, policy_version, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).bind(newId('com'), srId, intentId, q.referrerUserId, currency, cashMinor, q.commissionMinor, vestAt, REFERRAL_POLICY_VERSION, now),
+    db.prepare(`INSERT INTO referral_commissions (id, successful_referral_id, qualifying_bid_intent_id, referrer_user_id, currency, eligible_base_minor, commission_minor, state, vest_at, policy_version, created_at, is_test)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`).bind(newId('com'), srId, intentId, q.referrerUserId, currency, cashMinor, q.commissionMinor, vestAt, REFERRAL_POLICY_VERSION, now, isTest ? 1 : 0),
     outboxStatement(db, 'ReferralQualified', srId, { referrer: q.referrerUserId, intentId }, now),
   ];
 }

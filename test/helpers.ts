@@ -9,6 +9,8 @@ import { iso } from '../src/lib/time';
 export const E = env as unknown as Env;
 export const db = () => E.DB;
 export const cfg = () => config(E);
+/** Real-money settings (sandbox) with a low payout minimum: payouts are disabled in simulated mode. */
+export const realCfg = () => ({ ...config(E), paymentMode: 'sandbox' as const, minPayout: { USD: 100, VND: 1000 } });
 
 export async function makeUser(name = 'Builder', email: string | null = null) {
   const id = newId('usr');

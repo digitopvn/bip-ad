@@ -17,6 +17,7 @@ Status: MVP defaults. The owner must approve them before go-live.
 - The commission is 5% of the external-cash part of that first bid only. There is no lifetime commission.
 - It stays `pending` until the hold period ends, then becomes `available`.
 - A refund or chargeback claws it back: first from pending, then from available, and any remainder is recorded as a receivable.
+- Vesting and clawback guard each other, so a commission clawed back while it vests never becomes spendable.
 
 ## Wallet
 - The available balance can pay for all or part of a bid.
@@ -25,7 +26,7 @@ Status: MVP defaults. The owner must approve them before go-live.
 - Users cannot transfer wallet funds to each other.
 
 ## Payouts
-1. `payouts.request` reserves available funds. The minimum is `MIN_PAYOUT_USD_CENTS` or `MIN_PAYOUT_VND`. Beneficiary details are encrypted with AES-GCM.
+1. `payouts.request` reserves available funds. It is refused while `PAYMENT_MODE=simulated`, and commissions created by simulated payments (`is_test`) are excluded from the payable balance in every mode. The minimum is `MIN_PAYOUT_USD_CENTS` or `MIN_PAYOUT_VND`. Beneficiary details are encrypted with AES-GCM.
 2. The operator prepares a monthly batch.
 3. The operator makes each bank transfer by hand, then records it with the reference, the exact amount and proof. Transfers can be recorded only on days 01–10 (ICT).
 

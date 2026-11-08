@@ -70,7 +70,7 @@ describe('user MCP', () => {
     expect(w.data.balances).toEqual([]);
     const pr = await tool(u, 'payouts.request', { currency: 'USD', amount_minor: 1000, payout_method: 'paypal', beneficiary_reference: 'me@example.com', idempotency_key: 'payout-agent-1' });
     expect(pr.isError).toBe(true);
-    expect(pr.data.error.code).toBe('insufficient_wallet');
+    expect(pr.data.error.code).toBe('payouts_disabled'); // simulated money never pays out
   });
 
   it('A18: another account gets 403 on edit, bid and status, without data leakage', async () => {

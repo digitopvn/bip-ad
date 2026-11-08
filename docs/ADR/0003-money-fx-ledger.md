@@ -26,12 +26,18 @@ Accounts:
 | Account | Purpose |
 |---|---|
 | `asset:cash:{provider}` | Cash received from a payment provider |
+| `asset:cash:simulated:{provider}` | Simulated receipts (`PAYMENT_MODE=simulated`); never real money |
 | `liability:ads_pending:{board}` | Ads share awaiting its cohort |
 | `liability:ads_fund:{board}` | Ads share in a finalized cohort |
 | `liability:wallet:{user}:{pending\|available\|reserved_bid\|reserved_payout}` | Commission owed to a user, by state |
 | `revenue:platform` | Platform share |
 | `asset:cash:bank_payouts` | Cash paid out by manual bank transfer |
 | `asset:clawback_receivable:{user}` | Clawed-back commission a user still owes |
+
+## Atomicity without transactions
+- D1 has no interactive transactions, so every multi-row change is one `db.batch()`.
+- A batch that depends on a state transition (`UPDATE ... WHERE state = ?`) also inserts a guard row into `batch_guards`. The insert violates NOT NULL exactly when the expected state is missing, which aborts the batch. A lost race fails loudly and is retried with fresh reads, instead of posting money for a transition that did not happen.
+- `payment_reversals` (primary key `payment_id`) allows one refund or chargeback per payment, whatever the event kind.
 
 ## Wallet projection
 - `wallet_balances` is a projection updated in the same batch as the ledger.
@@ -40,7 +46,9 @@ Accounts:
 
 ## Cohorts and refunds
 - Cohort finalization moves each cutoff's ads share from `ads_pending` to `ads_fund` exactly once, enforced by a UNIQUE `bid_contribution_id`.
-- A refund after the cohort was funded posts a corrective debit to `ads_fund`.
+- A refund after the cohort was funded posts a corrective debit to `ads_fund` and lowers the flight's hard cap (never below what is already committed).
+- Finalization takes every active, unallocated contribution assigned to this cutoff **or earlier**. A settlement that committed just after its own cohort was finalized is funded by the next cohort instead of being lost.
+- Refund and finalization guard each other: the refund checks that the cohort membership it read still holds, and finalization checks that each included contribution is still active. The loser retries.
 
 ## Eligible revenue and currencies
 - `eligible_revenue` is the confirmed bid value minus refunds made before finalization.

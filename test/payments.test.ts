@@ -54,7 +54,7 @@ describe('PayPal', () => {
     const pending = normalizePayPal({ ...paypalCapture(intent.id, 'CAP-P', '15.00'), resource: { ...paypalCapture(intent.id, 'CAP-P', '15.00').resource, status: 'PENDING' } });
     expect((await processEvent(db(), sandboxCfg(), pending)).status).toBe('ignored');
     expect((await processEvent(db(), sandboxCfg(), normalizePayPal({ id: newId('WH'), event_type: 'PAYMENT.CAPTURE.DENIED', resource: { id: 'x' } }))).status).toBe('ignored');
-    expect((await processEvent(db(), sandboxCfg(), normalizePayPal(paypalCapture(intent.id, 'CAP-W', '1.00')))).status).toBe('rejected:amount_mismatch');
+    expect((await processEvent(db(), sandboxCfg(), normalizePayPal(paypalCapture(intent.id, 'CAP-W', '1.00')))).status).toBe('review:amount_mismatch');
     expect(await contributions(intent.id)).toBe(0);
     expect((await getIntent(db(), intent.id))!.status).toBe('needs_review');
   });
