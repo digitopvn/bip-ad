@@ -521,6 +521,15 @@ describe('round-five regressions', () => {
     expect((await resolvePaymentReview(db(), sandbox(), 'operator:test', reviewId, 'dismiss', 'x')).status).toBe('settled');
   });
 
+  it('partial-refund reviews stay open while the capture is still being settled', async () => {
+    const { capId, reviewId } = await heldCapture('PARTCLAIM');
+    expect((await processEvent(db(), sandbox(), refundEvent(capId, '5.00'))).status).toBe('partial_review');
+    await claimAt(reviewId, Date.now());
+    expect((await processEvent(db(), sandbox(), refundEvent(capId, '10.00'))).status).toBe('retry');
+    const open = await db().prepare(`SELECT COUNT(*) AS n FROM payment_reviews WHERE provider_payment_id = ? AND kind = 'partial_refund' AND status = 'open'`).bind(capId).first<{ n: number }>();
+    expect(open!.n).toBe(2);
+  });
+
   it('partial refunds that reach the capture close their partial-refund reviews too', async () => {
     const { capId } = await heldCapture('PARTS');
     await processEvent(db(), sandbox(), refundEvent(capId, '5.00'));

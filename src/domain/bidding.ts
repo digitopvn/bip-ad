@@ -510,15 +510,16 @@ export async function resolvePaymentReview(db: D1Database, cfg: Config, actor: s
     const cur = await db.prepare('SELECT status FROM payment_reviews WHERE id = ?').bind(rv.id).first<{ status: string }>();
     return { review_id: rv.id, status: cur?.status ?? 'unknown' };
   }
+  const reopenClaim = () => db.prepare(`UPDATE payment_reviews SET status = 'open', resolution = NULL, resolved_at = NULL WHERE id = ? AND status = 'settled' AND resolved_at = ?`).bind(rv.id, now).run();
   let r: SettlementResult;
   try {
     r = await settle(db, cfg, { intentId: intent.id, provider: rv.provider, providerPaymentId: rv.provider_payment_id, currency: rv.currency!, cashMinor: rv.amount_minor!, confirmedAtMs: nowMs, isTest: !!rv.is_test, fromReview: true });
   } catch (e) {
-    await db.prepare(`UPDATE payment_reviews SET status = 'open', resolution = NULL, resolved_at = NULL WHERE id = ?`).bind(rv.id).run();
+    await reopenClaim();
     throw e;
   }
   if (r.status !== 'settled' && r.status !== 'duplicate') {
-    await db.prepare(`UPDATE payment_reviews SET status = 'open', resolution = NULL, resolved_at = NULL WHERE id = ?`).bind(rv.id).run();
+    await reopenClaim();
     throw new DomainError('not_settleable', `Settlement refused: ${r.reason}`, 409);
   }
   await decisionStatement(db, { actor, action: 'payments.resolve_review', decision: 'allow', reasons: [note.slice(0, 120) || 'SETTLE'], policy: 'payments-v1', resourceId: rv.id }, now).run();
