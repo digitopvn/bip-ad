@@ -1,0 +1,15 @@
+# Copy to .dev.vars for `wrangler dev`. In production push each value with `wrangler secret put NAME`.
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# Random 32+ byte strings.
+SESSION_SECRET=
+OPERATOR_TOKEN=
+# Only needed when PAYMENT_MODE=sandbox|live.
+PAYPAL_CLIENT_ID=
+PAYPAL_CLIENT_SECRET=
+PAYPAL_WEBHOOK_ID=
+SEPAY_MERCHANT_ID=
+SEPAY_SECRET_KEY=
+SEPAY_IPN_SECRET=

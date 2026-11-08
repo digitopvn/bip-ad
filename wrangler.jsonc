@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bip-ad",
+  "account_id": "009dc0fcd0da3e503fbf38eb2b586e4b",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": false },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "bip-ad", "database_id": "c3c2be94-1aab-419b-ac9f-c68b84a9308b", "migrations_dir": "migrations" }
+  ],
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "99ed5f2116484791ab66e90e298cff89" }],
+  // 03:12 ICT (UTC+7, no DST) = 20:12 UTC on the previous day. The hourly run vests commissions, expires quotes and catches up a missed lock (idempotent).
+  "triggers": { "crons": ["12 20 * * *", "40 * * * *"] },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://bip-ad.digitop-vn.workers.dev",
+    "PAYMENT_MODE": "simulated",
+    "LIVE_PAYMENTS": "false",
+    "MIN_BID_UNITS": "100",
+    "MIN_BID_INCREMENT_UNITS": "100",
+    "FX_USD_VND": "25400",
+    "QUOTE_TTL_SECONDS": "900",
+    "REFERRAL_HOLD_DAYS": "30",
+    "REFERRAL_ATTRIBUTION_DAYS": "30",
+    "MIN_PAYOUT_USD_CENTS": "1000",
+    "MIN_PAYOUT_VND": "250000",
+    "AUTO_APPROVE_PRODUCTS": "true",
+    "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
+    "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
+    "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init"
+  },
+  "observability": { "enabled": true }
+}

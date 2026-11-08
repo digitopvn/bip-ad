@@ -1,0 +1,58 @@
+import type { Env } from '../env';
+import { DAY_MS } from '../lib/time';
+
+export type Board = 'daily' | 'weekly' | 'monthly';
+export const BOARDS: Board[] = ['daily', 'weekly', 'monthly'];
+export const isBoard = (s: string): s is Board => (BOARDS as string[]).includes(s);
+
+/** Contribution lifetime and ad-flight length per board (ADR-0002: rolling from confirmed_at). */
+export const BOARD_DURATION_MS: Record<Board, number> = { daily: DAY_MS, weekly: 7 * DAY_MS, monthly: 30 * DAY_MS };
+export const BOARD_HOURS: Record<Board, number> = { daily: 24, weekly: 168, monthly: 720 };
+export const BOARD_DAYS: Record<Board, number> = { daily: 1, weekly: 7, monthly: 30 };
+
+export const RANKING_POLICY_VERSION = 'rank-v1';
+export const METRIC_WINDOW_MS = 30 * DAY_MS;
+export const REFERRAL_POLICY_VERSION = 'ref-v1-first-cash-bid';
+export const MODERATION_POLICY_VERSION = 'mod-v1';
+export const ADS_SHARE_BPS = 8000; // 80%
+export const COMMISSION_SHARE_BPS = 500; // 5%
+export const TOP_N = 10;
+
+export type PaymentMode = 'simulated' | 'sandbox' | 'live';
+export type Currency = 'USD' | 'VND';
+
+export interface Config {
+  paymentMode: PaymentMode;
+  minBidUnits: number;
+  minIncrementUnits: number;
+  fxUsdVnd: number;
+  quoteTtlMs: number;
+  referralHoldMs: number;
+  referralAttributionMs: number;
+  minPayout: Record<Currency, number>;
+  autoApprove: boolean;
+  origin: string;
+}
+
+const int = (v: string | undefined, d: number) => {
+  const n = Number(v);
+  return v !== undefined && v !== '' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : d;
+};
+
+export function config(env: Env): Config {
+  // Live mode needs both PAYMENT_MODE=live and the explicit LIVE_PAYMENTS flag; otherwise it degrades to sandbox.
+  let mode: PaymentMode = env.PAYMENT_MODE === 'live' || env.PAYMENT_MODE === 'sandbox' ? env.PAYMENT_MODE : 'simulated';
+  if (mode === 'live' && env.LIVE_PAYMENTS !== 'true') mode = 'sandbox';
+  return {
+    paymentMode: mode,
+    minBidUnits: int(env.MIN_BID_UNITS, 100),
+    minIncrementUnits: int(env.MIN_BID_INCREMENT_UNITS, 100),
+    fxUsdVnd: int(env.FX_USD_VND, 25400),
+    quoteTtlMs: int(env.QUOTE_TTL_SECONDS, 900) * 1000,
+    referralHoldMs: int(env.REFERRAL_HOLD_DAYS, 30) * DAY_MS,
+    referralAttributionMs: int(env.REFERRAL_ATTRIBUTION_DAYS, 30) * DAY_MS,
+    minPayout: { USD: int(env.MIN_PAYOUT_USD_CENTS, 1000), VND: int(env.MIN_PAYOUT_VND, 250000) },
+    autoApprove: env.AUTO_APPROVE_PRODUCTS === 'true',
+    origin: (env.PUBLIC_ORIGIN || 'http://localhost:8787').replace(/\/$/, ''),
+  };
+}

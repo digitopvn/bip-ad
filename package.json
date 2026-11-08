@@ -1,0 +1,38 @@
+{
+  "name": "bip-ad",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BIP.AD: an open, pay-to-win launch board that locks at 03:12 ICT. Products are listed by AI agents over MCP.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 migrations apply bip-ad --local",
+    "db:migrate:remote": "wrangler d1 migrations apply bip-ad --remote",
+    "db:seed:remote": "node seed/generate-sample.mjs > seed/sample.sql && wrangler d1 execute bip-ad --remote --file=seed/sample.sql"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "hono": "^4.13.17",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/workers-types": "^5.20261108.1",
+    "typescript": "^5.9.3",
+    "vitest": "~4.1.12",
+    "wrangler": "^4.158.0"
+  },
+  "packageManager": "pnpm@10.34.9",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd",
+      "sharp"
+    ]
+  }
+}
