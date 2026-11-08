@@ -1,6 +1,6 @@
 // Turns verified provider events into settlements/refunds. Event ids are recorded with
 // UNIQUE(provider, event_id) so a replayed webhook is acknowledged without side effects.
-import { type Provider, flagCaptureForReview, getIntent, refund, settle } from '../domain/bidding';
+import { type Provider, flagCaptureForReview, getIntent, refund, resolvePaymentReview, settle } from '../domain/bidding';
 import type { Config } from '../domain/config';
 import { isConstraintError } from '../domain/errors';
 import { newId } from '../lib/ids';
@@ -96,10 +96,14 @@ async function apply(db: D1Database, cfg: Config, ev: NormalizedEvent, nowMs: nu
   if ((ev.action === 'refund' || ev.action === 'chargeback') && ev.providerPaymentId) {
     const r = await refund(db, { provider: ev.provider, providerPaymentId: ev.providerPaymentId, kind: ev.action, atMs: nowMs, amountMinor: ev.amountMinor, eventRef: ev.eventId });
     if (r.status !== 'unknown') return r.status;
-    // A reversal of a capture we only hold as a review (never settled) needs no ledger change.
-    const reviewed = await db.prepare(`SELECT 1 FROM payment_reviews WHERE provider = ? AND provider_payment_id = ? AND kind = 'capture'`).bind(ev.provider, ev.providerPaymentId).first();
+    // A reversal of a capture we only hold as a review (never settled) needs no ledger change, but
+    // the review must close so the operator can no longer settle money that was returned.
+    const { results: open } = await db.prepare(`SELECT id FROM payment_reviews WHERE provider = ? AND provider_payment_id = ? AND kind = 'capture'`)
+      .bind(ev.provider, ev.providerPaymentId).all<{ id: string }>();
     // Otherwise it may have arrived before its capture: ask the provider to redeliver.
-    return reviewed ? 'ignored:reviewed_capture' : 'retry';
+    if (!open.length) return 'retry';
+    for (const rv of open) await resolvePaymentReview(db, cfg, 'system:provider', rv.id, 'dismiss', `${ev.action} by provider`, nowMs);
+    return 'reviewed_capture_reversed';
   }
   return 'ignored';
 }

@@ -339,11 +339,15 @@ export async function refund(db: D1Database, r: RefundInput): Promise<RefundResu
     if (r.amountMinor !== undefined && r.amountMinor < pay.cash_minor) {
       // Partial refund: the bid stays (policy in ADR-0004) until the refunds add up to the captured
       // cash; then the whole payment is reversed like a full refund. Each event is recorded once.
+      const reviewId = newId('prv');
       await db.batch([
         db.prepare(`INSERT INTO payment_reviews (id, provider, event_ref, kind, bid_intent_id, provider_payment_id, currency, amount_minor, reason, is_test, status, created_at)
                     VALUES (?, ?, ?, 'partial_refund', ?, ?, ?, ?, 'partial_refund', ?, 'open', ?) ON CONFLICT (provider, event_ref) DO NOTHING`)
-          .bind(newId('prv'), r.provider, r.eventRef ?? `partial:${r.providerPaymentId}:${r.amountMinor}`, pay.bid_intent_id, r.providerPaymentId, pay.currency, r.amountMinor, pay.is_test, now),
-        outboxStatement(db, 'PartialRefundNeedsReview', pay.id, { amount: r.amountMinor, captured: pay.cash_minor }, now),
+          .bind(reviewId, r.provider, r.eventRef ?? `partial:${r.providerPaymentId}:${r.amountMinor}`, pay.bid_intent_id, r.providerPaymentId, pay.currency, r.amountMinor, pay.is_test, now),
+        // Written only when this delivery recorded the refund (a redelivery leaves no row with this id).
+        db.prepare(`INSERT INTO outbox_events (id, event_type, aggregate_id, payload_json, created_at)
+                    SELECT ?, 'PartialRefundNeedsReview', ?, ?, ? WHERE EXISTS (SELECT 1 FROM payment_reviews WHERE id = ?)`)
+          .bind(newId('evt'), pay.id, JSON.stringify({ amount: r.amountMinor, captured: pay.cash_minor }), now, reviewId),
       ]);
       const total = await db.prepare(`SELECT COALESCE(SUM(amount_minor), 0) AS s FROM payment_reviews
           WHERE provider = ? AND provider_payment_id = ? AND kind = 'partial_refund'`).bind(r.provider, r.providerPaymentId).first<{ s: number }>();
@@ -472,8 +476,10 @@ export async function resolvePaymentReview(db: D1Database, cfg: Config, actor: s
     ...extra,
   ]);
   if (resolution === 'dismiss') {
-    await close('dismissed', rv.bid_intent_id ? [db.prepare(`UPDATE bid_intents SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'needs_review'`).bind(now, rv.bid_intent_id)] : []);
-    if (rv.bid_intent_id) await releaseWallet(db, rv.bid_intent_id, 'payment review dismissed', nowMs);
+    const held = rv.bid_intent_id ? (await getIntent(db, rv.bid_intent_id))?.status === 'needs_review' : false;
+    await close('dismissed', held ? [db.prepare(`UPDATE bid_intents SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'needs_review'`).bind(now, rv.bid_intent_id)] : []);
+    // An intent that never moved to needs_review (e.g. a wrong-provider capture) can still be paid: keep its wallet reservation.
+    if (held) await releaseWallet(db, rv.bid_intent_id!, 'payment review dismissed', nowMs);
     return { review_id: rv.id, status: 'dismissed' };
   }
   const intent = rv.bid_intent_id ? await getIntent(db, rv.bid_intent_id) : null;

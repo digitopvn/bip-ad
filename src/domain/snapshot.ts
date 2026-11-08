@@ -10,6 +10,9 @@ import { loadStandings } from './ranking';
 
 export const MEDIA_PLATFORMS = ['x', 'facebook', 'youtube'] as const;
 
+/** Cutoffs older than this can no longer be locked (cron catch-up and the operator both stop here). */
+export const CATCH_UP_DAYS = 3;
+
 export async function getSnapshot(db: D1Database, board: Board, cutoffMs: number) {
   return db.prepare('SELECT * FROM board_snapshots WHERE board = ? AND cutoff_at = ?').bind(board, iso(cutoffMs))
     .first<{ id: string; board: Board; cutoff_at: string; executed_at: string; ranking_policy_version: string; ranking_metric_window: string }>();
@@ -62,8 +65,10 @@ async function tryFinalizeCohort(db: D1Database, board: Board, cutoffMs: number,
   const { results } = await db.prepare(`SELECT c.id, c.currency, c.gross_minor, c.ads_minor, c.commission_minor, c.platform_minor, p.wallet_minor
       FROM bid_contributions c JOIN payments p ON p.bid_intent_id = c.bid_intent_id
       WHERE c.board = ? AND c.status = 'active'
-        AND (c.assigned_cutoff_at = ? OR (c.assigned_cutoff_at < ? AND EXISTS (SELECT 1 FROM revenue_cohorts rc WHERE rc.board = c.board AND rc.cutoff_at = c.assigned_cutoff_at)))
-        AND NOT EXISTS (SELECT 1 FROM revenue_cohort_contributions rc WHERE rc.bid_contribution_id = c.id)`).bind(board, cutoff, cutoff)
+        AND (c.assigned_cutoff_at = ? OR (c.assigned_cutoff_at < ? AND (
+              EXISTS (SELECT 1 FROM revenue_cohorts rc WHERE rc.board = c.board AND rc.cutoff_at = c.assigned_cutoff_at)
+              OR c.assigned_cutoff_at <= ?)))
+        AND NOT EXISTS (SELECT 1 FROM revenue_cohort_contributions rc WHERE rc.bid_contribution_id = c.id)`).bind(board, cutoff, cutoff, iso(cutoffMs - CATCH_UP_DAYS * DAY_MS))
     .all<{ id: string; currency: string; gross_minor: number; ads_minor: number; commission_minor: number; platform_minor: number; wallet_minor: number }>();
 
   const byCurrency = new Map<string, typeof results>();
@@ -156,7 +161,7 @@ export async function runLock(db: D1Database, origin: string, cutoffMs: number, 
 }
 
 /** Catch up: lock the latest cutoff and any of the previous `lookbackDays` that were missed (late or failed runs). */
-export async function runDueLocks(db: D1Database, origin: string, nowMs = Date.now(), lookbackDays = 2) {
+export async function runDueLocks(db: D1Database, origin: string, nowMs = Date.now(), lookbackDays = CATCH_UP_DAYS - 1) {
   const latest = cutoffAtOrBefore(nowMs);
   const out = [];
   for (let d = lookbackDays; d >= 0; d--) out.push(await runLock(db, origin, latest - d * DAY_MS, nowMs));

@@ -7,7 +7,7 @@ import { resolvePaymentReview } from '../domain/bidding';
 import { DomainError } from '../domain/errors';
 import { decisionStatement } from '../domain/ledger';
 import { moderateProduct, pendingModeration } from '../domain/products';
-import { finalizeCohort, freezeBoard, produceMockMedia, runLock } from '../domain/snapshot';
+import { CATCH_UP_DAYS, finalizeCohort, freezeBoard, produceMockMedia, runLock } from '../domain/snapshot';
 import { failPayout, preparePayoutBatch, recordManualTransfer } from '../domain/wallet';
 import type { Env } from '../env';
 import { iso } from '../lib/time';
@@ -27,7 +27,6 @@ function cutoffArg(s: string) {
   return ms;
 }
 
-const CATCH_UP_DAYS = 3;
 
 export function operatorMcpServer(env: Env) {
   const db = env.DB;

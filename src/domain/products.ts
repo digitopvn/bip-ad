@@ -208,8 +208,8 @@ export async function moderateProduct(db: D1Database, actor: string, productId: 
   if (!p) throw notFound('Product not found');
   // Approving pending changes must approve exactly what the operator reviewed: the owner could
   // swap the pending edit or page between the review and the approval.
-  if (decision === 'approve' && (p.pending_edit_json || p.pending_page_version_id) && expectedVersion === undefined) {
-    throw new DomainError('version_required', `Pass product_version (currently ${p.version}) to approve pending changes`, 409);
+  if (decision === 'approve' && expectedVersion === undefined) {
+    throw new DomainError('version_required', `Pass product_version (currently ${p.version}, from products.pending) to approve`, 409);
   }
   if (expectedVersion !== undefined && expectedVersion !== p.version) throw new DomainError('version_conflict', `Product is at version ${p.version}; review it again`, 409);
   const now = iso(nowMs);
@@ -258,8 +258,10 @@ export async function moderateProduct(db: D1Database, actor: string, productId: 
 
 /** Products waiting for the operator: submissions and pending changes to published products. */
 export async function pendingModeration(db: D1Database) {
-  const { results } = await db.prepare(`SELECT p.id, p.slug, p.name, p.tagline, p.website_url, p.status, p.version, p.pending_edit_json, p.pending_page_version_id, v.blocks_json AS pending_blocks_json
-      FROM products p LEFT JOIN product_page_versions v ON v.id = p.pending_page_version_id
+  // The page shown is the one approval would publish: the pending version, or for a submission the latest draft.
+  const { results } = await db.prepare(`SELECT p.id, p.slug, p.name, p.tagline, p.website_url, p.status, p.version, p.pending_edit_json, p.pending_page_version_id, v.version AS page_version, v.blocks_json
+      FROM products p LEFT JOIN product_page_versions v ON v.id = COALESCE(p.pending_page_version_id,
+        CASE WHEN p.status = 'pending_review' THEN (SELECT id FROM product_page_versions WHERE product_id = p.id ORDER BY version DESC LIMIT 1) END)
       WHERE p.status = 'pending_review' OR p.pending_edit_json IS NOT NULL OR p.pending_page_version_id IS NOT NULL
       ORDER BY p.updated_at LIMIT 100`).all<Record<string, unknown>>();
   return results;
@@ -275,8 +277,12 @@ export async function setBlocks(db: D1Database, userId: string, productId: strin
     const version = (last?.v ?? 0) + 1;
     const id = newId('pgv');
     try {
-      await db.prepare(`INSERT INTO product_page_versions (id, product_id, version, schema_version, blocks_json, moderation_status, created_at)
-                        VALUES (?, ?, ?, ?, ?, 'draft', ?)`).bind(id, p.id, version, PAGE_SCHEMA_VERSION, JSON.stringify(v.blocks), now).run();
+      // The product version moves with every page draft so moderation can pin what it reviewed.
+      await db.batch([
+        db.prepare(`INSERT INTO product_page_versions (id, product_id, version, schema_version, blocks_json, moderation_status, created_at)
+                    VALUES (?, ?, ?, ?, ?, 'draft', ?)`).bind(id, p.id, version, PAGE_SCHEMA_VERSION, JSON.stringify(v.blocks), now),
+        db.prepare('UPDATE products SET version = version + 1, updated_at = ? WHERE id = ?').bind(now, p.id),
+      ]);
       return { ok: true as const, pageVersionId: id, version };
     } catch (e) {
       if (!isConstraintError(e)) throw e;

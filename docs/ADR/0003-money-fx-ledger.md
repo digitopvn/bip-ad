@@ -47,7 +47,7 @@ Accounts:
 ## Cohorts and refunds
 - Cohort finalization moves each cutoff's ads share from `ads_pending` to `ads_fund` exactly once, enforced by a UNIQUE `bid_contribution_id`.
 - A refund after the cohort was funded posts a corrective debit to `ads_fund` and lowers the flight's hard cap (never below what is already committed).
-- Finalization takes every active, unallocated contribution assigned to this cutoff, plus stragglers assigned to an earlier cutoff whose cohort already exists. A settlement that committed just after its own cohort was finalized is funded by the next cohort instead of being lost, and running cutoffs out of order never moves a day's revenue into a later cohort.
+- Finalization takes every active, unallocated contribution assigned to this cutoff, plus stragglers assigned to an earlier cutoff whose cohort already exists. A settlement that committed just after its own cohort was finalized is funded by the next cohort instead of being lost, and running cutoffs out of order never moves a day's revenue into a later cohort. A cutoff that can no longer be locked (older than the 3-day catch-up window) rolls its revenue into the next cohort, so no ads share stays in `ads_pending` for good.
 - Refund and finalization guard each other: the refund checks that the cohort membership it read still holds, and finalization checks that each included contribution is still active. The loser retries.
 
 ## Eligible revenue and currencies

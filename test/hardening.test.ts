@@ -368,3 +368,54 @@ describe('round-two regressions', () => {
     expect(rows.results).toEqual([{ cutoff_at: iso(C), eligible_revenue_minor: 4000 }, { cutoff_at: iso(C + DAY_MS), eligible_revenue_minor: 0 }]);
   });
 });
+
+describe('round-three regressions', () => {
+  it('approving a submission pins the reviewed version, including page swaps', async () => {
+    const u = await makeUser();
+    const { createProduct, submitProduct, pendingModeration } = await import('../src/domain/products');
+    const strict = { ...cfg(), autoApprove: false };
+    const pr = await createProduct(db(), u, { name: 'Pinned Submission', tagline: 'Pinned', website_url: 'https://pinned.example.com' }, newId('k'));
+    await setBlocks(db(), u, pr.id, [{ type: 'hero', headline: 'Reviewed page' }]);
+    await submitProduct(db(), strict, u, pr.id);
+    const listed = (await pendingModeration(db())).find(x => x.id === pr.id)!;
+    expect(String(listed.blocks_json)).toContain('Reviewed page');
+    await setBlocks(db(), u, pr.id, [{ type: 'hero', headline: 'Swapped page' }]);
+    await expect(moderateProduct(db(), 'operator:test', pr.id, 'approve', 'OK')).rejects.toMatchObject({ code: 'version_required' });
+    await expect(moderateProduct(db(), 'operator:test', pr.id, 'approve', 'OK', Date.now(), listed.version as number)).rejects.toMatchObject({ code: 'version_conflict' });
+  });
+
+  it('a refund of a capture held in review closes the review so it can never be settled', async () => {
+    const { intent } = await openIntent();
+    await db().prepare(`UPDATE bid_intents SET status = 'cancelled' WHERE id = ?`).bind(intent.id).run();
+    const capId = 'CAP-RVREF-' + intent.id;
+    await processEvent(db(), sandbox(), capture(intent.id, capId, '15.00'));
+    expect((await processEvent(db(), sandbox(), refundEvent(capId))).status).toBe('reviewed_capture_reversed');
+    const rv = await db().prepare('SELECT id, status FROM payment_reviews WHERE provider_payment_id = ?').bind(capId).first<{ id: string; status: string }>();
+    expect(rv!.status).toBe('dismissed');
+    expect((await resolvePaymentReview(db(), sandbox(), 'operator:test', rv!.id, 'settle', 'late')).status).toBe('dismissed');
+    expect(await db().prepare('SELECT 1 FROM bid_contributions WHERE bid_intent_id = ?').bind(intent.id).first()).toBeNull();
+  });
+
+  it('dismissing a wrong-provider review keeps the wallet reservation of a still-payable intent', async () => {
+    const u = await makeUser();
+    const p = await makeProduct(u, 'Keep Wallet');
+    const { intent } = await quote(db(), cfg(), u, { productId: p, board: 'daily', rankUnits: 1000, currency: 'USD', idempotencyKey: newId('q') });
+    await db().prepare(`UPDATE bid_intents SET status = 'awaiting_payment', provider = 'paypal' WHERE id = ?`).bind(intent.id).run();
+    const ev = { provider: 'sepay' as const, eventId: newId('ipn'), eventType: 'ORDER_PAID', action: 'capture_completed' as const, intentId: intent.id, providerPaymentId: 'TX-KW-' + intent.id, currency: 'VND', amountMinor: 254000 };
+    await processEvent(db(), sandbox(), ev);
+    const rv = await db().prepare('SELECT id FROM payment_reviews WHERE provider_payment_id = ?').bind(ev.providerPaymentId).first<{ id: string }>();
+    await resolvePaymentReview(db(), sandbox(), 'operator:test', rv!.id, 'dismiss', 'refunded at SePay');
+    expect((await getIntent(db(), intent.id))!.status).toBe('awaiting_payment');
+  });
+
+  it('revenue of a cutoff that can no longer be locked rolls into the next cohort', async () => {
+    const C = cutoffForIctDate('2037-07-07');
+    const u = await makeUser();
+    const p = await makeProduct(u, 'Missed Day');
+    await bid(u, p, 'monthly', 6000, C - 60_000);
+    const later = C + 4 * DAY_MS; // the lock was down for longer than the catch-up window
+    await finalizeCohort(db(), 'monthly', later, later + 1000);
+    const c = await db().prepare(`SELECT eligible_revenue_minor FROM revenue_cohorts WHERE board = 'monthly' AND cutoff_at = ? AND currency = 'USD'`).bind(iso(later)).first();
+    expect(c).toEqual({ eligible_revenue_minor: 6000 });
+  });
+});
