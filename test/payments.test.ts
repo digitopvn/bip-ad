@@ -6,6 +6,9 @@ import { newId } from '../src/lib/ids';
 import { normalizePayPal, normalizeSePay, processEvent } from '../src/payments/process';
 import { verifyWebhook } from '../src/payments/paypal';
 import { app } from '../src/app';
+import { assertProviderEnabled, providerEnabled } from '../src/payments/checkout';
+import { checkoutView } from '../src/routes/view-data';
+import type { Env } from '../src/env';
 import { signCheckoutFields, verifyIpn } from '../src/payments/sepay';
 import { E, db, ledgerBalancedEverywhere, makeProduct, makeUser } from './helpers';
 
@@ -95,6 +98,20 @@ describe('PayPal', () => {
     const parsed = JSON.parse(sent);
     expect(parsed.webhook_id).toBe('WH-ID');
     expect(parsed.webhook_event.id).toBe('WH-RAW');
+  });
+
+  it('a provider is offered and accepted only once its secrets are set (simulated mode offers all)', async () => {
+    const sandbox = { ...E, PAYMENT_MODE: 'sandbox', PAYPAL_CLIENT_ID: 'id', PAYPAL_CLIENT_SECRET: 'sec', PAYPAL_WEBHOOK_ID: 'WH', SEPAY_MERCHANT_ID: undefined, SEPAY_SECRET_KEY: undefined, SEPAY_IPN_SECRET: undefined } as Env;
+    const sc = config(sandbox);
+    expect(providerEnabled(sandbox, sc, 'paypal')).toBe(true);
+    expect(providerEnabled(sandbox, sc, 'sepay')).toBe(false);
+    expect(providerEnabled({ ...sandbox, PAYPAL_WEBHOOK_ID: undefined }, sc, 'paypal')).toBe(false);
+    expect(providerEnabled(E, config(E), 'sepay')).toBe(true);
+    expect(() => assertProviderEnabled(sandbox, sc, 'sepay')).toThrow(/not available/);
+    expect(() => assertProviderEnabled(sandbox, sc, 'wallet')).not.toThrow();
+    const { intent } = await openIntent('sepay');
+    expect((await checkoutView(sandbox, intent, true, 'csrf', null)).providers).toEqual([]);
+    expect((await checkoutView(E, intent, true, 'csrf', null)).providers).toEqual(['sepay']);
   });
 
   it('PayPal return GET has no side effects; only the POST it renders captures and settles', async () => {

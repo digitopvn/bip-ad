@@ -8,6 +8,7 @@ import { getOrCreateReferralCode, referralStats } from '../domain/referrals';
 import { getSnapshot } from '../domain/snapshot';
 import { payoutStatus, walletBalances } from '../domain/wallet';
 import type { Env } from '../env';
+import { providerEnabled } from '../payments/checkout';
 import { cutoffForIctDate, DAY_MS, ictDate, iso, nextCutoffAfter } from '../lib/time';
 import type { AccountView, BoardView, CheckoutView, HomeView, LayoutContext, ProductPageView, SnapshotView, WidgetBlock } from '../views/types';
 
@@ -135,7 +136,7 @@ export async function accountView(env: Env, user: UserRow): Promise<AccountView>
 export async function checkoutView(env: Env, intent: IntentRow, isOwner: boolean, csrf: string, message: string | null): Promise<CheckoutView> {
   const cfg = config(env);
   const p = await getProduct(env.DB, intent.product_id);
-  const providers = (Object.keys(PROVIDER_CURRENCY) as ('paypal' | 'sepay')[]).filter(k => PROVIDER_CURRENCY[k] === intent.quote_currency);
+  const providers = (Object.keys(PROVIDER_CURRENCY) as ('paypal' | 'sepay')[]).filter(k => PROVIDER_CURRENCY[k] === intent.quote_currency && providerEnabled(env, cfg, k));
   const expired = intent.status === 'quoted' || intent.status === 'awaiting_payment' ? Date.parse(intent.quote_expires_at) <= Date.now() : false;
   return {
     intentId: intent.id, status: expired ? 'expired' : intent.status, productName: p?.name ?? 'Unknown product', productSlug: p?.slug ?? '',
