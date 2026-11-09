@@ -30,5 +30,37 @@
     "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
     "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init"
   },
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+
+  // Top-level config above is STAGING (deployed from the `dev` branch, plain `wrangler deploy`).
+  // Production is deployed with `--env production` from the `main` branch.
+  // Bindings and vars are not inherited by environments, so production restates them all.
+  "env": {
+    "production": {
+      "name": "bip-ad-production",
+      "workers_dev": false,
+      "routes": [{ "pattern": "bip.ad", "custom_domain": true }],
+      "d1_databases": [
+        { "binding": "DB", "database_name": "bip-ad-production", "database_id": "d598eb40-7a02-4dad-8276-54e358006943", "migrations_dir": "migrations" }
+      ],
+      "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "151153360d7e4e0caa3366e7f3d6531b" }],
+      "vars": {
+        "PUBLIC_ORIGIN": "https://bip.ad",
+        "PAYMENT_MODE": "simulated",
+        "LIVE_PAYMENTS": "false",
+        "MIN_BID_UNITS": "100",
+        "MIN_BID_INCREMENT_UNITS": "100",
+        "FX_USD_VND": "25400",
+        "QUOTE_TTL_SECONDS": "900",
+        "REFERRAL_HOLD_DAYS": "30",
+        "REFERRAL_ATTRIBUTION_DAYS": "30",
+        "MIN_PAYOUT_USD_CENTS": "1000",
+        "MIN_PAYOUT_VND": "250000",
+        "AUTO_APPROVE_PRODUCTS": "true",
+        "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
+        "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
+        "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init"
+      }
+    }
+  }
 }

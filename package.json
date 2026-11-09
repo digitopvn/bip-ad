@@ -7,11 +7,14 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --env=\"\"",
+    "deploy:staging": "wrangler deploy --env=\"\"",
+    "deploy:production": "wrangler deploy --env production",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:migrate:local": "wrangler d1 migrations apply bip-ad --local",
-    "db:migrate:remote": "wrangler d1 migrations apply bip-ad --remote",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote --env=\"\"",
+    "db:migrate:production": "wrangler d1 migrations apply DB --remote --env production",
     "db:seed:remote": "node seed/generate-sample.mjs > seed/sample.sql && wrangler d1 execute bip-ad --remote --file=seed/sample.sql"
   },
   "dependencies": {
