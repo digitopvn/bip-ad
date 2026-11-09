@@ -32,7 +32,8 @@ A user with no email on file, or who switched the group off, gets a row marked `
 `/account` has a switch for each group. Each grouped email sent from an https origin carries `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058) pointing at `/email/unsubscribe?t=<token>&g=<group>`. GET only shows a confirmation, because link scanners follow GETs. POST switches the group off. The token is random per user and stored in `email_preferences`, not derived from `SESSION_SECRET`.
 
 ## Configuration
-- `send_email` binding `EMAIL` (`remote: true`) and `EMAIL_FROM` (`bip.ad <noreply@bip.ad>`) in both environments of `wrangler.jsonc`. `EMAIL_REPLY_TO` is optional and unset, because `bip.ad` receives no mail.
+- `send_email` binding `EMAIL` (`remote: true`), `EMAIL_FROM` (`bip.ad <hello@bip.ad>`) and `EMAIL_REPLY_TO` (`hello@bip.ad`) in both environments of `wrangler.jsonc`. The sender is a real inbox, not `noreply`, because mailbox providers trust senders that can receive replies.
+- Cloudflare Email Routing is enabled on `bip.ad` (MX and SPF on the root). `hello@bip.ad` and `dmarc@bip.ad` forward to the owner's inbox; rules only work once the destination address is verified.
 - The `bip.ad` zone is onboarded for Email Sending (SPF and MX on `cf-bounce.bip.ad`, DKIM, DMARC). Sending to arbitrary recipients requires Workers Paid.
 - Staging sends real email to every user. Subjects start with `[staging] ` whenever `PUBLIC_ORIGIN` is not `bip.ad`.
 - Tests set `remoteBindings: false` and inject a fake transport.

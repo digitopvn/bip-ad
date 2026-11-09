@@ -55,7 +55,7 @@ export interface Env {
   OPENROUTER_API_KEY?: string;
   /** Cloudflare Email Service binding for transactional email. Without it emails stay queued. */
   EMAIL?: SendEmail;
-  /** Sender, "Name <address>" or a bare address, e.g. "bip.ad <noreply@bip.ad>". */
+  /** Sender, "Name <address>" or a bare address, e.g. "bip.ad <hello@bip.ad>". */
   EMAIL_FROM?: string;
   /** Optional Reply-To address for transactional email. */
   EMAIL_REPLY_TO?: string;
