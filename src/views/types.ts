@@ -17,7 +17,7 @@ export interface LayoutContext {
   viewer: Viewer | null;
   /** True when payments run in simulated or sandbox mode. Shown as a banner. */
   testMode: boolean;
-  /** Absolute public origin, e.g. https://bip-ad.digitop-vn.workers.dev */
+  /** Absolute public origin, e.g. https://bip-ad.digitop.workers.dev */
   origin: string;
 }
 

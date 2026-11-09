@@ -14,7 +14,7 @@ set -euo pipefail
 
 ENV_NAME="${1:-}"
 case "$ENV_NAME" in
-  staging)    WRANGLER_ENV="";           HOST="bip-ad.digitop-vn.workers.dev"; API="https://api-m.sandbox.paypal.com"; APP_KIND="Sandbox"; MODE="sandbox" ;;
+  staging)    WRANGLER_ENV="";           HOST="bip-ad.digitop.workers.dev"; API="https://api-m.sandbox.paypal.com"; APP_KIND="Sandbox"; MODE="sandbox" ;;
   production) WRANGLER_ENV="production"; HOST="bip.ad";                         API="https://api-m.paypal.com";         APP_KIND="Live";    MODE="live" ;;
   *) echo "Usage: $0 staging|production" >&2; exit 1 ;;
 esac

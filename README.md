@@ -50,7 +50,7 @@ Two environments live in `wrangler.jsonc`:
 
 | Environment | Branch | Worker | URL | Config |
 |---|---|---|---|---|
-| Staging | `dev` | `bip-ad` | https://bip-ad.digitop-vn.workers.dev | top level (`--env=""`) |
+| Staging | `dev` | `bip-ad` | https://bip-ad.digitop.workers.dev | top level (`--env=""`) |
 | Production | `main` | `bip-ad-production` | https://bip.ad, https://www.bip.ad | `env.production` (`--env production`) |
 
 Both environments run AI moderation (`MODERATION_MODE=ai`, [ADR-0008](docs/ADR/0008-ai-moderation.md)). Every submission and edit is scored: the regex screen and a fast decision model (Clef-flash) run inline, then the landing page is fetched and scored by Clef together with an evidence LLM (DeepSeek V4.1 Flash). Low-risk changes publish automatically. Everything else waits for the operator's agent over `/operator/mcp` (`products.pending` shows the scores, then `products.moderate`). Workers AI runs on its own Cloudflare account, so each environment needs the secrets `AI_CLOUDFLARE_ACCOUNT_ID` and `AI_CLOUDFLARE_API_TOKEN`. Without them, every change waits for the operator.
@@ -65,6 +65,8 @@ for s in SESSION_SECRET OPERATOR_TOKEN; do wrangler secret put $s --env producti
 scripts/set-worker-secrets.sh production   # hidden prompts for GitHub/Google OAuth; stores them in `ak secrets` and on the worker
 scripts/set-worker-secrets.sh production AI_CLOUDFLARE_ACCOUNT_ID AI_CLOUDFLARE_API_TOKEN   # Workers AI account for moderation
 scripts/setup-paypal.sh production   # Live REST app: checks the credentials, creates or reuses the webhook, stores PAYPAL_CLIENT_ID/SECRET/WEBHOOK_ID
+# Credentials already in the vault: same checks and webhook, uploads to the worker without prompts
+ak secrets run --env PAYPAL_CLIENT_ID=BIPAD_PAYPAL_CLIENT_ID_STAGING --env PAYPAL_CLIENT_SECRET=BIPAD_PAYPAL_CLIENT_SECRET_STAGING -- "$PWD/scripts/paypal-webhook-and-worker-secrets.mjs" staging
 pnpm deploy:production
 ```
 
