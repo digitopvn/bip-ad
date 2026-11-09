@@ -39,13 +39,27 @@ pnpm typecheck && pnpm test
 Set the OAuth callback URLs to `https://<host>/auth/github/callback` and `https://<host>/auth/google/callback`.
 
 ## Deploy
+Two environments live in `wrangler.jsonc`:
+
+| Environment | Branch | Worker | URL | Config |
+|---|---|---|---|---|
+| Staging | `dev` | `bip-ad` | https://bip-ad.digitop-vn.workers.dev | top level (`--env=""`) |
+| Production | `main` | `bip-ad-production` | https://bip.ad, https://www.bip.ad | `env.production` (`--env production`) |
+
+Staging auto-approves products that pass screening. Production does not (`AUTO_APPROVE_PRODUCTS=false`): every submission and edit waits for the operator's agent to review it over `/operator/mcp` (`products.pending`, then `products.moderate`).
+
+Each environment has its own D1 database, KV namespace and secrets. CI (`.github/workflows/ci.yml`) runs typecheck and tests on every push and PR. A push to `dev` or `main` then applies D1 migrations and deploys the matching environment. The repository needs the GitHub secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts, D1, Workers KV and Workers Routes edit, plus Zone read for `bip.ad`) and `CLOUDFLARE_ACCOUNT_ID`.
+
+One-time setup for a new environment:
 ```bash
-wrangler d1 create bip-ad && wrangler kv namespace create OAUTH_KV   # put the ids in wrangler.jsonc
-pnpm db:migrate:remote
-for s in GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET SESSION_SECRET OPERATOR_TOKEN; do wrangler secret put $s; done
-pnpm deploy
-pnpm db:seed:remote                   # optional: products labelled "sample"; their boosts are not revenue
+wrangler d1 create bip-ad-production && wrangler kv namespace create bip-ad-oauth-production   # put the ids in env.production
+pnpm db:migrate:production
+for s in SESSION_SECRET OPERATOR_TOKEN; do wrangler secret put $s --env production; done
+scripts/set-oauth-secrets.sh production   # hidden prompts for GitHub/Google OAuth; stores them in `ak secrets` and on the worker
+pnpm deploy:production
 ```
+
+Manual deploys: `pnpm deploy:staging` / `pnpm deploy:production`, with `pnpm db:migrate:remote` / `pnpm db:migrate:production` first. `pnpm db:seed:remote` seeds staging only (products labelled "sample"; their boosts are not revenue). Do not seed production.
 
 ## Decisions
 Architecture and money rules are recorded in [`docs/ADR/`](docs/ADR):

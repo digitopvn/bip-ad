@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
   pull_request:
 permissions:
   contents: read
@@ -18,3 +18,33 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+
+  # Push to `dev` deploys staging (top-level wrangler config); push to `main` deploys production (`--env production`).
+  deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      url: ${{ github.ref_name == 'main' && 'https://bip.ad' || 'https://bip-ad.digitop-vn.workers.dev' }}
+    # Never run two deploys (and their D1 migrations) for the same environment at once.
+    concurrency:
+      group: deploy-${{ github.ref_name }}
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Empty string targets the top-level (staging) config explicitly.
+      WRANGLER_ENV: ${{ github.ref_name == 'main' && 'production' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply D1 migrations
+        run: pnpm exec wrangler d1 migrations apply DB --remote --env="$WRANGLER_ENV"
+      - name: Deploy worker
+        run: pnpm exec wrangler deploy --env="$WRANGLER_ENV"
