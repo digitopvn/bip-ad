@@ -38,7 +38,7 @@ export async function projectAll(nowMs = Date.now()) {
 }
 
 export async function emailsOf(userId: string, kind?: string) {
-  const { results } = await db().prepare(`SELECT * FROM email_outbox WHERE user_id = ? ${kind ? 'AND kind = ?' : ''} ORDER BY created_at, id`)
+  const { results } = await db().prepare(`SELECT * FROM email_outbox WHERE user_id = ? ${kind ? 'AND kind = ?' : ''} ORDER BY created_at, rowid`)
     .bind(...(kind ? [userId, kind] : [userId])).all<EmailRow>();
   return results;
 }
