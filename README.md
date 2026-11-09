@@ -44,7 +44,9 @@ Two environments live in `wrangler.jsonc`:
 | Environment | Branch | Worker | URL | Config |
 |---|---|---|---|---|
 | Staging | `dev` | `bip-ad` | https://bip-ad.digitop-vn.workers.dev | top level (`--env=""`) |
-| Production | `main` | `bip-ad-production` | https://bip.ad | `env.production` (`--env production`) |
+| Production | `main` | `bip-ad-production` | https://bip.ad, https://www.bip.ad | `env.production` (`--env production`) |
+
+Staging auto-approves products that pass screening. Production does not (`AUTO_APPROVE_PRODUCTS=false`): every submission and edit waits for the operator's agent to review it over `/operator/mcp` (`products.pending`, then `products.moderate`).
 
 Each environment has its own D1 database, KV namespace and secrets. CI (`.github/workflows/ci.yml`) runs typecheck and tests on every push and PR. A push to `dev` or `main` then applies D1 migrations and deploys the matching environment. The repository needs the GitHub secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts, D1, Workers KV and Workers Routes edit, plus Zone read for `bip.ad`) and `CLOUDFLARE_ACCOUNT_ID`.
 

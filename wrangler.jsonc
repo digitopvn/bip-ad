@@ -39,7 +39,10 @@
     "production": {
       "name": "bip-ad-production",
       "workers_dev": false,
-      "routes": [{ "pattern": "bip.ad", "custom_domain": true }],
+      "routes": [
+        { "pattern": "bip.ad", "custom_domain": true },
+        { "pattern": "www.bip.ad", "custom_domain": true }
+      ],
       "d1_databases": [
         { "binding": "DB", "database_name": "bip-ad-production", "database_id": "d598eb40-7a02-4dad-8276-54e358006943", "migrations_dir": "migrations" }
       ],
@@ -56,7 +59,8 @@
         "REFERRAL_ATTRIBUTION_DAYS": "30",
         "MIN_PAYOUT_USD_CENTS": "1000",
         "MIN_PAYOUT_VND": "250000",
-        "AUTO_APPROVE_PRODUCTS": "true",
+        // Production products wait for the operator's agent to approve them over /operator/mcp (products.pending, products.moderate).
+        "AUTO_APPROVE_PRODUCTS": "false",
         "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
         "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
         "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init"
