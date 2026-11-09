@@ -8,6 +8,8 @@
 
 > Status: MVP (Phases 1–3 of [the decision brief](docs/BIP_AD_Decision_Brief_v1.1.md)). Payments run in **simulated mode**, so no money moves. Video, social and ads adapters are mocks. Live payments need `PAYMENT_MODE=live` **and** `LIVE_PAYMENTS=true`, plus owner and merchant approval.
 
+Policies are public at `/terms`, `/privacy` and `/refunds` (linked from the footer and checkout; owner legal review pending before live payments).
+
 ## Stack
 Cloudflare Workers, Hono, D1 (data and double-entry ledger), KV (OAuth and sessions), Cron Triggers, `@cloudflare/workers-oauth-provider`, and `@modelcontextprotocol/sdk` (Streamable HTTP). Tests run on Vitest with `@cloudflare/vitest-pool-workers`.
 

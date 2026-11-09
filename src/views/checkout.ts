@@ -96,6 +96,7 @@ export function checkoutPage(ctx: LayoutContext, view: CheckoutView): string {
       <dl class="panel-box co-summary">${rows.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl>
       <div class="co-side">
         <div class="all-pay" role="note"><strong>All-pay:</strong> you pay whether or not you reach the Top 10. No refunds for being outbid. No guaranteed results.</div>
+        <p class="muted">By paying you accept the <a href="/terms">Terms of Service</a> and the <a href="/refunds">Refund Policy</a>.</p>
         <p class="muted">Pay-to-win: the highest active bid ranks first and other bids can pass yours at any time. Your rank moves only after the provider confirms the payment.</p>
         ${payArea(view)}
       </div>
