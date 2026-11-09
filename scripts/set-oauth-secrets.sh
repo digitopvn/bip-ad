@@ -15,6 +15,11 @@ case "$ENV_NAME" in
   production) WRANGLER_ENV="production"; HOST="bip.ad" ;;
   *) echo "Usage: $0 staging|production" >&2; exit 1 ;;
 esac
+# Hidden prompts need a real terminal; Claude Code's `!` prefix does not provide one.
+if [ ! -t 0 ]; then
+  echo "This script reads values with hidden prompts and needs an interactive terminal. Run it in your own terminal." >&2
+  exit 1
+fi
 ENV_UPPER="$(printf '%s' "$ENV_NAME" | tr '[:lower:]' '[:upper:]')"
 
 cd "$(dirname "$0")/.."
