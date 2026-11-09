@@ -17,7 +17,7 @@
   // The 15-minute run only sends email, in its own invocation so it never shares the D1 query limit with the lock. Environments inherit these triggers.
   "triggers": { "crons": ["12 20 * * *", "40 * * * *", "*/15 * * * *"] },
   "vars": {
-    "PUBLIC_ORIGIN": "https://bip-ad.digitop-vn.workers.dev",
+    "PUBLIC_ORIGIN": "https://bip-ad.digitop.workers.dev",
     // Staging takes PayPal sandbox payments. A provider is offered only once its secrets are set
     // (scripts/setup-paypal.sh), so SePay stays unavailable until it is configured.
     "PAYMENT_MODE": "sandbox",

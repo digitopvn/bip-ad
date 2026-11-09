@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
-      url: ${{ github.ref_name == 'main' && 'https://bip.ad' || 'https://bip-ad.digitop-vn.workers.dev' }}
+      url: ${{ github.ref_name == 'main' && 'https://bip.ad' || 'https://bip-ad.digitop.workers.dev' }}
     # Never run two deploys (and their D1 migrations) for the same environment at once.
     concurrency:
       group: deploy-${{ github.ref_name }}
