@@ -23,7 +23,7 @@ export interface Env {
   MODERATION_MODE?: string;
   /** Decision (System One) model provider: cloudflare (Clef on Workers AI), typesafe (Jev) or openrouter (Jev). */
   MODERATION_DECISION_PROVIDER?: string;
-  /** Fast decision model for the inline stage, e.g. clef-flash. */
+  /** Fast decision model for the inline stage, e.g. clef or clef-omni. */
   MODERATION_DECISION_MODEL_FAST?: string;
   /** Decision model for the full (async) stage, e.g. clef. */
   MODERATION_DECISION_MODEL?: string;

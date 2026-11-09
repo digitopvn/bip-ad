@@ -24,6 +24,10 @@ const JOB_TYPE = 'ai_moderation';
 const MAX_ATTEMPTS = 3;
 const STALE_RUNNING_MS = 10 * 60_000;
 const MAX_PAGE_TEXT_CHARS = 12_000;
+/** Total budget for the external calls of the async stage, inside the 30 s waitUntil window. */
+const FULL_STAGE_BUDGET_MS = 25_000;
+/** Statuses the AI may approve from. It never lifts a suspension or a rejection. */
+const AI_APPROVABLE: ('pending_review' | 'published')[] = ['pending_review', 'published'];
 
 export interface ModerationDeps {
   fast: DecisionModel;
@@ -41,7 +45,7 @@ export interface ModerationStatus {
 
 /** Builds the provider clients from env; null when any of them lacks credentials. */
 export function moderationDeps(env: Env, cfg: Config): ModerationDeps | null {
-  const fast = decisionModel(env, (env.MODERATION_DECISION_MODEL_FAST ?? 'clef-flash').trim() || 'clef-flash');
+  const fast = decisionModel(env, (env.MODERATION_DECISION_MODEL_FAST ?? 'clef').trim() || 'clef');
   const full = decisionModel(env, (env.MODERATION_DECISION_MODEL ?? 'clef').trim() || 'clef');
   const chat = chatModel(env);
   if (!fast || !full || !chat) return null;
@@ -68,7 +72,8 @@ async function loadSubject(db: D1Database, productId: string): Promise<Subject |
              ELSE p.current_page_version_id END)
       WHERE p.id = ?`).bind(productId).first<Record<string, string | number | null>>();
   if (!p) return null;
-  const awaiting = p.status === 'pending_review' || p.pending_edit_json !== null || p.pending_page_version_id !== null;
+  // Suspended, rejected and draft products are the operator's; pending fields on them are never scored.
+  const awaiting = p.status === 'pending_review' || (p.status === 'published' && (p.pending_edit_json !== null || p.pending_page_version_id !== null));
   if (!awaiting) return null;
   const edit = p.pending_edit_json ? (JSON.parse(String(p.pending_edit_json)) as Subject['fields']) : null;
   return {
@@ -100,6 +105,15 @@ const landingState = (l: LandingPage) => l.ok
 /** JSON for the LLM prompt with "<" escaped, so untrusted text cannot close the data tags. */
 const tagSafe = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
 
+/** Rejects when the deadline passes first, so the async stage never outlives its waitUntil window. */
+function beforeDeadline<T>(p: Promise<T>, deadlineMs: number, label: string): Promise<T> {
+  const left = deadlineMs - Date.now();
+  if (left <= 0) return Promise.reject(new Error(`${label} skipped: full stage budget spent`));
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_r, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out`)), left); });
+  return Promise.race([p, timeout]).finally(() => { if (timer !== null) clearTimeout(timer); });
+}
+
 // ---------- job bookkeeping (job_runs keyed by product id + version) ----------
 
 async function claimJob(db: D1Database, productId: string, version: number, nowMs: number) {
@@ -119,6 +133,12 @@ async function claimJob(db: D1Database, productId: string, version: number, nowM
 async function finishJob(db: D1Database, productId: string, version: number, status: 'done' | 'retry' | 'failed' | 'superseded', note: string) {
   await db.prepare(`UPDATE job_runs SET status = ?, finished_at = ?, detail = json_set(COALESCE(detail, '{}'), '$.note', ?) WHERE job_type = ? AND resource_id = ? AND version = ?`)
     .bind(status, iso(Date.now()), note, JOB_TYPE, productId, String(version)).run();
+}
+
+async function jobStatus(db: D1Database, productId: string, version: number) {
+  const r = await db.prepare(`SELECT status FROM job_runs WHERE job_type = ? AND resource_id = ? AND version = ?`)
+    .bind(JOB_TYPE, productId, String(version)).first<{ status: string }>();
+  return r?.status ?? null;
 }
 
 async function attempts(db: D1Database, productId: string, version: number) {
@@ -167,20 +187,22 @@ async function runFastStage(db: D1Database, deps: ModerationDeps, s: Subject): P
 async function runFullStage(db: D1Database, cfg: Config, deps: ModerationDeps, scored: Subject) {
   const s = await loadSubject(db, scored.productId);
   if (!s || s.version !== scored.version) return finishJob(db, scored.productId, scored.version, 'superseded', 'product changed before full scoring');
-  const landing = await deps.fetchPage(s.fields.website_url);
+  const deadline = Date.now() + FULL_STAGE_BUDGET_MS;
+  const landing = await beforeDeadline(deps.fetchPage(s.fields.website_url), deadline, 'landing page fetch');
   const state = { listing: listingState(s), landing_page: landingState(landing) };
-  const [answers, raw] = await Promise.all([
+  const [answers, raw] = await beforeDeadline(Promise.all([
     deps.full.ask(state, FULL_QUESTIONS),
     deps.chat.json(EVIDENCE_SYSTEM_PROMPT, `<listing>${tagSafe(state.listing)}</listing>\n<landing_page>${tagSafe(state.landing_page)}</landing_page>`),
-  ]);
+  ]), deadline, 'full scoring');
   const evidence = parseEvidence(raw);
   const v = fullVerdict(answers, landing.ok, evidence, deps.maxRisk);
   await recordScore(db, s, 'full', deps.full, v, answers, { evidence, landing });
   if (v.verdict === 'allow' && cfg.moderationMode === 'ai') {
     try {
-      await moderateProduct(db, AI_ACTOR, s.productId, 'approve', 'AI_FULL_PASSED', Date.now(), s.version);
+      await moderateProduct(db, AI_ACTOR, s.productId, 'approve', 'AI_FULL_PASSED', Date.now(), s.version, AI_APPROVABLE);
     } catch (e) {
-      if (e instanceof DomainError && e.code === 'version_conflict') return finishJob(db, s.productId, s.version, 'superseded', 'product changed during scoring');
+      // The operator decided, or the builder changed it, while the AI was scoring: their version wins.
+      if (e instanceof DomainError && (e.code === 'version_conflict' || e.code === 'status_conflict')) return finishJob(db, s.productId, s.version, 'superseded', 'product changed during scoring');
       throw e;
     }
   }
@@ -207,7 +229,13 @@ export async function moderateAfterChange(env: Env, cfg: Config, productId: stri
   const s = await loadSubject(db, productId);
   if (!s) return null;
   if (!deps) return { state: 'needs_operator', reasons: ['AI_NOT_CONFIGURED'] };
-  if (!(await claimJob(db, s.productId, s.version, Date.now()))) return { state: 'scoring', reasons: ['AI_ALREADY_SCORING'] };
+  if (!(await claimJob(db, s.productId, s.version, Date.now()))) {
+    // This version was already claimed: tell the agent where it actually stands.
+    const status = await jobStatus(db, s.productId, s.version);
+    if (status === 'running') return { state: 'scoring', reasons: ['AI_ALREADY_SCORING'] };
+    if (status === 'retry') return { state: 'scoring', reasons: ['AI_RETRY_SCHEDULED'] };
+    return { state: 'needs_operator', reasons: [status === 'failed' ? 'AI_UNAVAILABLE' : 'AI_ALREADY_SCORED'] };
+  }
   let fast: Verdict;
   try {
     fast = await runFastStage(db, deps, s);
@@ -229,8 +257,10 @@ export async function runModerationJob(env: Env, cfg: Config, productId: string,
   const s = await loadSubject(db, productId);
   if (!s || !deps) return { productId, ran: false, reason: !s ? 'not_awaiting_moderation' : 'ai_not_configured' };
   if (force) {
-    await db.prepare(`UPDATE job_runs SET status = 'retry', detail = json_set(COALESCE(detail, '{}'), '$.attempts', 0) WHERE job_type = ? AND resource_id = ? AND version = ?`)
-      .bind(JOB_TYPE, s.productId, String(s.version)).run();
+    // A job that is still running (and not stale) keeps its claim, so a rescore never runs the same version twice at once.
+    await db.prepare(`UPDATE job_runs SET status = 'retry', detail = json_set(COALESCE(detail, '{}'), '$.attempts', 0)
+        WHERE job_type = ? AND resource_id = ? AND version = ? AND (status <> 'running' OR started_at < ?)`)
+      .bind(JOB_TYPE, s.productId, String(s.version), iso(Date.now() - STALE_RUNNING_MS)).run();
   }
   if (!(await claimJob(db, s.productId, s.version, Date.now()))) return { productId, ran: false, reason: 'already_scored_or_running' };
   try {
@@ -248,31 +278,58 @@ export async function runModerationJob(env: Env, cfg: Config, productId: string,
 }
 
 /** Hourly fallback: score products awaiting moderation whose current version has no finished job. */
-export async function sweepPendingModeration(env: Env, cfg: Config, nowMs = Date.now(), limit = 10) {
+export async function sweepPendingModeration(env: Env, cfg: Config, nowMs = Date.now(), limit = 10, deps = moderationDeps(env, cfg)) {
   if (cfg.moderationMode === 'screen') return [];
-  const deps = moderationDeps(env, cfg);
+  const stale = iso(nowMs - STALE_RUNNING_MS);
+  // A run that died on its last attempt can never be reclaimed: hand it to the operator so it stops clogging the sweep.
+  const { results: dead } = await env.DB.prepare(`UPDATE job_runs SET status = 'failed', finished_at = ?, detail = json_set(COALESCE(detail, '{}'), '$.note', 'stale after last attempt')
+      WHERE job_type = ? AND status = 'running' AND started_at < ? AND COALESCE(json_extract(detail, '$.attempts'), 0) >= ?
+      RETURNING resource_id, version`).bind(iso(nowMs), JOB_TYPE, stale, MAX_ATTEMPTS).all<{ resource_id: string; version: string }>();
+  for (const d of dead) {
+    await decisionStatement(env.DB, { actor: AI_ACTOR, action: 'products.ai_moderation', decision: 'defer', reasons: ['AI_UNAVAILABLE'], policy: AI_MODERATION_POLICY_VERSION, resourceId: d.resource_id, result: { version: Number(d.version) } }, iso(nowMs)).run();
+  }
   if (!deps) return [];
   const { results } = await env.DB.prepare(`SELECT p.id FROM products p
       LEFT JOIN job_runs j ON j.job_type = ? AND j.resource_id = p.id AND j.version = CAST(p.version AS TEXT)
-      WHERE (p.status = 'pending_review' OR p.pending_edit_json IS NOT NULL OR p.pending_page_version_id IS NOT NULL)
+      WHERE (p.status = 'pending_review' OR (p.status = 'published' AND (p.pending_edit_json IS NOT NULL OR p.pending_page_version_id IS NOT NULL)))
         AND (j.status IS NULL OR j.status = 'retry' OR (j.status = 'running' AND j.started_at < ?))
-      ORDER BY p.updated_at LIMIT ?`).bind(JOB_TYPE, iso(nowMs - STALE_RUNNING_MS), limit).all<{ id: string }>();
+      ORDER BY p.updated_at LIMIT ?`).bind(JOB_TYPE, stale, limit).all<{ id: string }>();
   const out = [];
   for (const r of results) out.push(await runModerationJob(env, cfg, r.id, deps));
   return out;
 }
 
+type ScoreRow = Record<string, string | number | null>;
+const parseJson = (v: unknown) => (typeof v === 'string' ? JSON.parse(v) : null);
+const scoreView = (r: ScoreRow) => ({
+  stage: r.stage, provider: r.provider, model: r.model, verdict: r.verdict, risk: r.risk, reasons: parseJson(r.reasons_json),
+  answers: parseJson(r.answers_json), evidence: parseJson(r.evidence_json), landing_page: parseJson(r.landing_json), created_at: r.created_at,
+});
+const jobView = (j: { status: string; detail: string | null } | undefined | null) => (j ? { status: j.status, ...parseJson(j.detail) } : null);
+
 /** Scores of one product version, newest first, for the operator queue. */
 export async function scoresFor(db: D1Database, productId: string, version: number) {
-  const { results } = await db.prepare(`SELECT stage, provider, model, verdict, risk, reasons_json, answers_json, evidence_json, landing_json, created_at
-      FROM moderation_scores WHERE product_id = ? AND product_version = ? ORDER BY created_at DESC`).bind(productId, version).all<Record<string, string | number | null>>();
-  const job = await db.prepare(`SELECT status, detail FROM job_runs WHERE job_type = ? AND resource_id = ? AND version = ?`).bind(JOB_TYPE, productId, String(version)).first<{ status: string; detail: string | null }>();
-  const parse = (v: unknown) => (typeof v === 'string' ? JSON.parse(v) : null);
-  return {
-    job: job ? { status: job.status, ...parse(job.detail) } : null,
-    scores: results.map(r => ({
-      stage: r.stage, provider: r.provider, model: r.model, verdict: r.verdict, risk: r.risk, reasons: parse(r.reasons_json),
-      answers: parse(r.answers_json), evidence: parse(r.evidence_json), landing_page: parse(r.landing_json), created_at: r.created_at,
-    })),
-  };
+  return (await scoresForMany(db, [{ productId, version }])).get(`${productId}@${version}`)!;
+}
+
+/** Scores of many product versions in two queries per chunk (no N+1), keyed by "productId@version". */
+export async function scoresForMany(db: D1Database, items: { productId: string; version: number }[]) {
+  const out = new Map<string, { job: ReturnType<typeof jobView>; scores: ReturnType<typeof scoreView>[] }>();
+  for (const i of items) out.set(`${i.productId}@${i.version}`, { job: null, scores: [] });
+  const ids = [...new Set(items.map(i => i.productId))];
+  for (let k = 0; k < ids.length; k += 50) {
+    const chunk = ids.slice(k, k + 50);
+    const marks = chunk.map(() => '?').join(', ');
+    const [scores, jobs] = await db.batch<ScoreRow>([
+      db.prepare(`SELECT product_id, product_version, stage, provider, model, verdict, risk, reasons_json, answers_json, evidence_json, landing_json, created_at
+          FROM moderation_scores WHERE product_id IN (${marks}) ORDER BY created_at DESC`).bind(...chunk),
+      db.prepare(`SELECT resource_id, version, status, detail FROM job_runs WHERE job_type = ? AND resource_id IN (${marks})`).bind(JOB_TYPE, ...chunk),
+    ]);
+    for (const r of scores.results) out.get(`${r.product_id}@${r.product_version}`)?.scores.push(scoreView(r));
+    for (const j of jobs.results) {
+      const entry = out.get(`${j.resource_id}@${j.version}`);
+      if (entry) entry.job = jobView(j as unknown as { status: string; detail: string | null });
+    }
+  }
+  return out;
 }

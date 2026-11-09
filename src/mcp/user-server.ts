@@ -24,7 +24,15 @@ export function userMcpServer(env: Env, userId: string, waitUntil: (p: Promise<u
   const db = env.DB;
   const cfg = config(env);
   /** Every submission and edit is re-scored; the answer tells the agent whether it is scoring or waiting for the operator. */
-  const moderate = (productId: string) => moderateAfterChange(env, cfg, productId, waitUntil);
+  // The change is already committed when moderation runs, so an AI failure must not turn the tool call into an error.
+  const moderate = async (productId: string) => {
+    try {
+      return await moderateAfterChange(env, cfg, productId, waitUntil);
+    } catch (e) {
+      console.error('ai moderation after change failed', productId, e instanceof Error ? e.message : e);
+      return { state: 'needs_operator' as const, reasons: ['AI_ERROR'] };
+    }
+  };
   const server = new McpServer({ name: 'bip-ad', version: '0.1.0' }, {
     instructions: 'BIP.AD lists products on three pay-to-win boards (Daily/Weekly/Monthly) that lock at 03:12 ICT. Create a product, set page blocks, submit, then quote and check out boosts. Checkouts are paid by the human on the returned URL. All bids are all-pay: no refunds for being outbid, no guaranteed results.',
   });

@@ -12,7 +12,7 @@ import { failPayout, preparePayoutBatch, recordManualTransfer } from '../domain/
 import type { Env } from '../env';
 import { iso } from '../lib/time';
 import { jsonTool } from './common';
-import { runModerationJob, scoresFor } from '../moderation/ai-moderation-pipeline';
+import { runModerationJob, scoresForMany } from '../moderation/ai-moderation-pipeline';
 
 const ACTOR = 'operator:grok';
 
@@ -49,8 +49,8 @@ export function operatorMcpServer(env: Env) {
   jsonTool(server, 'products.pending', 'Products waiting for moderation: submissions, and pending field edits or page versions of published products (with their version), each with the AI moderation scores of that exact version (ai_moderation).', {}, true,
     async () => {
       const rows = await pendingModeration(db);
-      const products = [];
-      for (const r of rows) products.push({ ...r, ai_moderation: await scoresFor(db, String(r.id), Number(r.version)) });
+      const scores = await scoresForMany(db, rows.map(r => ({ productId: String(r.id), version: Number(r.version) })));
+      const products = rows.map(r => ({ ...r, ai_moderation: scores.get(`${r.id}@${r.version}`) }));
       return { moderation_mode: cfg.moderationMode, products };
     });
 

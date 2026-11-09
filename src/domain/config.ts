@@ -1,5 +1,7 @@
 import type { Env } from '../env';
 import { DAY_MS } from '../lib/time';
+import { parseChatProvider } from '../moderation/chat-model-client';
+import { parseDecisionProvider } from '../moderation/decision-model-client';
 
 export type Board = 'daily' | 'weekly' | 'monthly';
 export const BOARDS: Board[] = ['daily', 'weekly', 'monthly'];
@@ -54,6 +56,11 @@ export function config(env: Env): Config {
   const rawModeration = (env.MODERATION_MODE ?? '').trim();
   if (rawModeration && rawModeration !== 'screen' && rawModeration !== 'manual' && rawModeration !== 'ai') throw new Error(`Invalid MODERATION_MODE "${rawModeration}": use screen, manual or ai`);
   const moderationMode: ModerationMode = (rawModeration || 'manual') as ModerationMode;
+  // A provider typo must fail at startup, not on the first scored change after it was committed.
+  if (moderationMode !== 'screen') {
+    parseDecisionProvider(env.MODERATION_DECISION_PROVIDER);
+    parseChatProvider(env.MODERATION_LLM_PROVIDER);
+  }
   let mode: PaymentMode = raw === 'live' || raw === 'sandbox' ? raw : 'simulated';
   if (mode === 'live' && env.LIVE_PAYMENTS !== 'true') mode = 'sandbox';
   return {

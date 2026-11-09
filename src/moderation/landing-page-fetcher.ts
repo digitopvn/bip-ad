@@ -75,27 +75,73 @@ const decodeEntities = (s: string) => s
   .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
   .replace(/&#(\d+);/g, (_m, n) => String.fromCodePoint(Math.min(Number(n), 0x10ffff)));
 
-/** Title, meta description, visible text and outbound hosts from raw HTML. Pure, so it is unit-tested. */
-export function extractPage(html: string, pageUrl: URL) {
-  const title = decodeEntities(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
-  const description = decodeEntities(
-    html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["']/i)?.[1]
-    ?? html.match(/<meta[^>]+content=["']([^"']*)["'][^>]*name=["']description["']/i)?.[1] ?? '',
-  ).trim().slice(0, 500);
+/** Only the start of a page is scanned; scam pages put their pitch up front, and the scan stays cheap. */
+const MAX_SCAN_CHARS = 128 * 1024;
+/** Elements whose content is never visible text. */
+const RAW_TEXT = new Set(['script', 'style', 'noscript', 'template', 'svg', 'textarea', 'iframe']);
+
+/** One attribute of a single start tag. The tag is bounded by the scanner, so this regex runs on short input. */
+function attr(tag: string, name: string) {
+  const m = tag.match(new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'));
+  return m ? (m[1] ?? m[2] ?? m[3] ?? '') : null;
+}
+
+/**
+ * Title, meta description, visible text and outbound hosts from raw HTML. A single forward scan with
+ * indexOf (linear time), because the HTML is attacker-controlled and backtracking regexes over it can
+ * take seconds. Pure, so it is unit-tested.
+ */
+export function extractPage(rawHtml: string, pageUrl: URL) {
+  const html = rawHtml.slice(0, MAX_SCAN_CHARS);
+  const lower = html.toLowerCase();
+  const text: string[] = [];
   const outbound = new Set<string>();
-  for (const m of html.matchAll(/<a\b[^>]*href=["']([^"']+)["']/gi)) {
-    try {
-      const h = new URL(m[1], pageUrl).hostname.toLowerCase();
-      if (h && h !== pageUrl.hostname.toLowerCase()) outbound.add(h);
-    } catch { /* ignore malformed links */ }
-    if (outbound.size >= 50) break;
+  const ownHost = pageUrl.hostname.toLowerCase();
+  let title = '';
+  let description = '';
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf('<', i);
+    if (lt < 0) {
+      text.push(html.slice(i));
+      break;
+    }
+    text.push(html.slice(i, lt));
+    if (lower.startsWith('<!--', lt)) {
+      const close = lower.indexOf('-->', lt + 4);
+      i = close < 0 ? html.length : close + 3;
+      continue;
+    }
+    const gt = html.indexOf('>', lt + 1);
+    if (gt < 0) break;
+    // Attributes are read from at most 4 KB of the tag, which keeps the attribute regex cheap.
+    const tag = html.slice(lt, Math.min(gt + 1, lt + 4096));
+    const name = /^<\/?([a-zA-Z][a-zA-Z0-9-]*)/.exec(tag)?.[1]?.toLowerCase() ?? '';
+    i = gt + 1;
+    text.push(' ');
+    if (tag[1] === '/' || !name) continue;
+    if (name === 'title' || RAW_TEXT.has(name)) {
+      const close = lower.indexOf(`</${name}`, i);
+      const inner = html.slice(i, close < 0 ? html.length : close);
+      if (name === 'title') {
+        if (!title) title = inner;
+        text.push(inner);
+      }
+      i = close < 0 ? html.length : close;
+    } else if (name === 'meta' && !description && attr(tag, 'name')?.toLowerCase() === 'description') {
+      description = attr(tag, 'content') ?? '';
+    } else if (name === 'a' && outbound.size < 50) {
+      const href = attr(tag, 'href');
+      if (href) {
+        try {
+          const h = new URL(href, pageUrl).hostname.toLowerCase();
+          if (h && h !== ownHost) outbound.add(h);
+        } catch { /* ignore malformed links */ }
+      }
+    }
   }
-  const text = decodeEntities(html
-    .replace(/<(script|style|noscript|template|svg)\b[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<[^>]+>/g, ' '))
-    .replace(/\s+/g, ' ').trim().slice(0, MAX_TEXT_CHARS);
-  return { title, description, text, outboundHosts: [...outbound] };
+  const clean = (v: string, max: number) => decodeEntities(v).replace(/\s+/g, ' ').trim().slice(0, max);
+  return { title: clean(title, 300), description: clean(description, 500), text: clean(text.join(''), MAX_TEXT_CHARS), outboundHosts: [...outbound] };
 }
 
 const hex = (buf: ArrayBuffer) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');

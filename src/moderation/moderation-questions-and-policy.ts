@@ -120,16 +120,20 @@ export function fullVerdict(answers: Record<string, DecisionAnswer>, landingOk: 
   return { verdict: reasons.length ? 'defer' : 'allow', risk: r, reasons: reasons.length ? reasons : ['AI_FULL_PASSED'] };
 }
 
-/** Normalizes the LLM reply into the evidence shape, dropping anything unexpected. */
-export function parseEvidence(raw: Record<string, unknown>): LlmEvidence {
-  const flags = Array.isArray(raw.red_flags) ? raw.red_flags : [];
+/**
+ * Normalizes the LLM reply into the evidence shape. Fails closed: a reply without a red_flags array
+ * is no evidence (null), and a flag whose severity is not low or medium counts as high.
+ */
+export function parseEvidence(raw: Record<string, unknown>): LlmEvidence | null {
+  if (!Array.isArray(raw.red_flags)) return null;
+  const flags: unknown[] = raw.red_flags;
   return {
     summary: typeof raw.summary === 'string' ? raw.summary.slice(0, 1000) : '',
-    red_flags: flags.slice(0, 20).flatMap(f => {
-      if (!f || typeof f !== 'object') return [];
-      const o = f as Record<string, unknown>;
-      const severity = o.severity === 'high' || o.severity === 'medium' ? o.severity : 'low';
-      return [{ severity, code: String(o.code ?? 'UNSPECIFIED').slice(0, 60), detail: String(o.detail ?? '').slice(0, 300) }];
+    red_flags: flags.slice(0, 20).map(f => {
+      const o = (f && typeof f === 'object' ? f : {}) as Record<string, unknown>;
+      const sev = String(o.severity ?? '').trim().toLowerCase();
+      const severity: 'low' | 'medium' | 'high' = sev === 'low' || sev === 'medium' ? sev : 'high';
+      return { severity, code: String(o.code ?? 'UNSPECIFIED').slice(0, 60), detail: String(o.detail ?? o.flag ?? '').slice(0, 300) };
     }),
   };
 }

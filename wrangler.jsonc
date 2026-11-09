@@ -28,7 +28,7 @@
     // AI moderation scores every submission and edit; low-risk ones publish automatically (see ADR-0008).
     "MODERATION_MODE": "ai",
     "MODERATION_DECISION_PROVIDER": "cloudflare",
-    "MODERATION_DECISION_MODEL_FAST": "clef-flash",
+    "MODERATION_DECISION_MODEL_FAST": "clef",
     "MODERATION_DECISION_MODEL": "clef",
     "MODERATION_LLM_PROVIDER": "cloudflare",
     "MODERATION_LLM_MODEL": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
@@ -69,7 +69,7 @@
         // AI moderation auto-approves low-risk changes; everything else waits for the operator over /operator/mcp.
         "MODERATION_MODE": "ai",
         "MODERATION_DECISION_PROVIDER": "cloudflare",
-        "MODERATION_DECISION_MODEL_FAST": "clef-flash",
+        "MODERATION_DECISION_MODEL_FAST": "clef",
         "MODERATION_DECISION_MODEL": "clef",
         "MODERATION_LLM_PROVIDER": "cloudflare",
         "MODERATION_LLM_MODEL": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",

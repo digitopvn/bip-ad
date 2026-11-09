@@ -23,12 +23,12 @@ export type DecisionProvider = 'cloudflare' | 'typesafe' | 'openrouter';
 
 const TIMEOUT_MS = 15_000;
 
-/** One HTTP endpoint per provider; Cloudflare keeps the model id in the path and the variant in the body. */
-function endpoint(env: Env, provider: DecisionProvider): { url: string; token: string | undefined } {
+/** One HTTP endpoint per provider. Workers AI puts the model in the path (clef, clef-omni) as well as in the body. */
+function endpoint(env: Env, provider: DecisionProvider, model: string): { url: string; token: string | undefined } {
   switch (provider) {
     case 'cloudflare':
       return {
-        url: `https://api.cloudflare.com/client/v4/accounts/${env.AI_CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/cloudflare/clef`,
+        url: `https://api.cloudflare.com/client/v4/accounts/${env.AI_CLOUDFLARE_ACCOUNT_ID}/ai/run/${model.startsWith('@cf/') ? model : `@cf/cloudflare/${model}`}`,
         token: env.AI_CLOUDFLARE_ACCOUNT_ID ? env.AI_CLOUDFLARE_API_TOKEN : undefined,
       };
     case 'typesafe':
@@ -47,7 +47,7 @@ export function parseDecisionProvider(raw: string | undefined): DecisionProvider
 /** Returns null when the provider has no credentials, so callers fall back to operator review. */
 export function decisionModel(env: Env, model: string): DecisionModel | null {
   const provider = parseDecisionProvider(env.MODERATION_DECISION_PROVIDER);
-  const { url, token } = endpoint(env, provider);
+  const { url, token } = endpoint(env, provider, model);
   if (!token) return null;
   return {
     provider,
@@ -64,12 +64,33 @@ export function decisionModel(env: Env, model: string): DecisionModel | null {
       // Workers AI wraps the model output in { result, success }; TypeSafe and OpenRouter return it bare.
       const answers = (body.result?.answers ?? body.answers) as Record<string, DecisionAnswer> | undefined;
       if (!answers || typeof answers !== 'object') throw new Error(`decision model ${provider}/${model} returned no answers`);
-      for (const id of Object.keys(questions)) {
-        if (!answers[id]) throw new Error(`decision model ${provider}/${model} skipped question ${id}`);
+      for (const [id, q] of Object.entries(questions)) {
+        const problem = answerProblem(q, answers[id]);
+        if (problem) throw new Error(`decision model ${provider}/${model} question ${id}: ${problem}`);
       }
       return answers;
     },
   };
+}
+
+const unit = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
+
+/**
+ * Why an answer cannot be trusted, or null. A malformed answer must never read as "no risk",
+ * so the caller throws and the job retries or goes to the operator.
+ */
+export function answerProblem(q: DecisionQuestion, a: DecisionAnswer | undefined): string | null {
+  if (!a || typeof a !== 'object') return 'missing answer';
+  if (a.type !== q.type) return `expected ${q.type}, got ${String((a as { type?: unknown }).type)}`;
+  if (a.type === 'noul') return unit(a.noul) ? null : 'noul out of range';
+  if (a.type === 'score') {
+    const max = q.type === 'score' ? q.criteria.length - 1 : 0;
+    return typeof a.score === 'number' && Number.isFinite(a.score) && a.score >= 0 && a.score <= max ? null : 'score out of range';
+  }
+  const options = q.type === 'choice' ? Object.keys(q.criteria) : [];
+  if (!options.includes(a.choice)) return 'unknown choice';
+  if (!a.probabilities || typeof a.probabilities !== 'object' || !Object.values(a.probabilities).every(unit)) return 'invalid probabilities';
+  return null;
 }
 
 /** Probability that a noul question holds (0 when the answer has another type). */
