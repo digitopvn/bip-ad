@@ -7,6 +7,8 @@ export default defineConfig({
     cloudflareTest(async () => ({
       main: './src/index.ts',
       wrangler: { configPath: './wrangler.jsonc' },
+      // Tests run offline: remote bindings (the send_email binding) use the local simulator; email tests inject a fake transport.
+      remoteBindings: false,
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations(path.join(import.meta.dirname, 'migrations')),

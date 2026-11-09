@@ -1,6 +1,7 @@
 // Web sessions (KV-backed, opaque cookie), user upsert and the signed referral cookie.
 import type { Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import { outboxStatement } from '../domain/ledger';
 import type { Env } from '../env';
 import { newId, randomToken } from '../lib/ids';
 import { sign, unsign } from '../lib/crypto';
@@ -64,6 +65,8 @@ export async function upsertUser(db: D1Database, ident: UpstreamIdentity, nowMs 
     await db.batch([
       db.prepare('INSERT INTO users (id, display_name, avatar_url, email, created_at) VALUES (?, ?, ?, ?, ?)').bind(id, ident.displayName, ident.avatarUrl, ident.email, now),
       db.prepare('INSERT INTO user_identities (provider, provider_user_id, user_id, created_at) VALUES (?, ?, ?, ?)').bind(ident.provider, ident.providerUserId, id, now),
+      // Drives the welcome email (src/email/).
+      outboxStatement(db, 'UserCreated', id, {}, now),
     ]);
     return { user: (await getUser(db, id))!, created: true };
   } catch {

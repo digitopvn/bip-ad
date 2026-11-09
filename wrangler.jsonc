@@ -11,6 +11,8 @@
     { "binding": "DB", "database_name": "bip-ad", "database_id": "c3c2be94-1aab-419b-ac9f-c68b84a9308b", "migrations_dir": "migrations" }
   ],
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "99ed5f2116484791ab66e90e298cff89" }],
+  // Cloudflare Email Service: transactional email (welcome, receipts, moderation decisions, lock results).
+  "send_email": [{ "name": "EMAIL", "remote": true }],
   // 03:12 ICT (UTC+7, no DST) = 20:12 UTC on the previous day. The hourly run vests commissions, expires quotes and catches up a missed lock (idempotent).
   "triggers": { "crons": ["12 20 * * *", "40 * * * *"] },
   "vars": {
@@ -35,7 +37,9 @@
     "MODERATION_APPROVE_MAX_RISK": "0.3",
     "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
     "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
-    "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init"
+    "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init",
+    // Sender of transactional email. Optional EMAIL_REPLY_TO adds a Reply-To header.
+    "EMAIL_FROM": "bip.ad <noreply@bip.ad>"
   },
   "observability": { "enabled": true },
 
@@ -54,6 +58,7 @@
         { "binding": "DB", "database_name": "bip-ad-production", "database_id": "d598eb40-7a02-4dad-8276-54e358006943", "migrations_dir": "migrations" }
       ],
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "151153360d7e4e0caa3366e7f3d6531b" }],
+      "send_email": [{ "name": "EMAIL", "remote": true }],
       "vars": {
         "PUBLIC_ORIGIN": "https://bip.ad",
         "PAYMENT_MODE": "simulated",
@@ -76,7 +81,8 @@
         "MODERATION_APPROVE_MAX_RISK": "0.3",
         "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
         "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
-        "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init"
+        "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init",
+        "EMAIL_FROM": "bip.ad <noreply@bip.ad>"
       }
     }
   }

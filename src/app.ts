@@ -21,6 +21,8 @@ import { captureOrder, verifyWebhook } from './payments/paypal';
 import { normalizePayPal, normalizeSePay, processEvent, simulatePayment } from './payments/process';
 import { checkoutForm, verifyIpn } from './payments/sepay';
 import { createProviderCheckout } from './payments/checkout';
+import { scheduleEmailProcessing } from './email/process-emails';
+import { accountEmailView, registerEmailRoutes } from './routes/email-routes';
 import { accountView, boardView, checkoutView, homeView, layoutCtx, productView, snapshotView } from './routes/view-data';
 import { accountPage } from './views/account';
 import { authorizePage } from './views/authorize';
@@ -50,6 +52,25 @@ app.use('*', secureHeaders({
   },
   crossOriginEmbedderPolicy: false,
 }));
+
+/** Waits for the response's background work; absent outside a Workers request (e.g. app.request in tests). */
+function waitUntilOf(c: C): ((p: Promise<unknown>) => void) | null {
+  try {
+    const ctx = c.executionCtx;
+    return p => ctx.waitUntil(p);
+  } catch {
+    return null;
+  }
+}
+
+// After any mutating request, project the domain events it wrote and send due emails in the
+// background. Card impression beacons write no domain events and are too frequent to bother.
+app.use('*', async (c, next) => {
+  await next();
+  if (c.req.method === 'GET' || c.req.method === 'HEAD' || c.req.path === '/api/events') return;
+  const wait = waitUntilOf(c);
+  if (wait) scheduleEmailProcessing(c.env, wait);
+});
 
 
 async function viewer(c: C) {
@@ -124,15 +145,17 @@ app.get('/r/:code', async c => {
 // ---------- Account ----------
 
 const accountHandler = async (c: C) => {
-  const { user } = await viewer(c);
-  if (!user) return c.redirect(`/login?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 302);
+  const { session, user } = await viewer(c);
+  if (!session || !user) return c.redirect(`/login?next=${encodeURIComponent(new URL(c.req.url).pathname)}`, 302);
   const v = await accountView(c.env, user);
-  return page(c, 'Your account — bip.ad', ctx => accountPage(ctx, v));
+  const email = await accountEmailView(c.env.DB, user, session.csrf, c.req.query('email') === 'saved');
+  return page(c, 'Your account — bip.ad', ctx => accountPage(ctx, v, email));
 };
 app.get('/account', accountHandler);
 app.get('/account/referrals', accountHandler);
 app.get('/account/wallet', accountHandler);
 app.get('/account/payouts', accountHandler);
+registerEmailRoutes(app, { viewer, page });
 
 // ---------- Checkout (human approval step) ----------
 
@@ -228,6 +251,9 @@ async function signIn(c: C, provider: UpstreamProvider, code: string) {
   if (created) {
     const ref = await readReferralCookie(c);
     if (ref) await attributeSignup(c.env.DB, config(c.env), user.id, ref.code, ref.clickedAtMs);
+    // Sign-in callbacks are GETs, which the mutating-request hook skips: send the welcome email now.
+    const wait = waitUntilOf(c);
+    if (wait) scheduleEmailProcessing(c.env, wait);
   }
   clearReferralCookie(c);
   await createSession(c, user.id);

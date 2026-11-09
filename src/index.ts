@@ -1,6 +1,7 @@
 import OAuthProvider from '@cloudflare/workers-oauth-provider';
 import { app } from './app';
 import { expireIntents } from './domain/bidding';
+import { processEmails, scheduleEmailProcessing } from './email/process-emails';
 import { config } from './domain/config';
 import { runDueLocks } from './domain/snapshot';
 import { vestCommissions } from './domain/wallet';
@@ -16,7 +17,10 @@ const mcpApi = {
     if (!userId) return new Response('unauthorized', { status: 401 });
     const user = await env.DB.prepare('SELECT status FROM users WHERE id = ?').bind(userId).first<{ status: string }>();
     if (!user || user.status !== 'active') return new Response('account suspended', { status: 403 });
-    return serveMcp(userMcpServer(env, userId, p => ctx.waitUntil(p)), request);
+    const res = await serveMcp(userMcpServer(env, userId, p => ctx.waitUntil(p)), request);
+    // Tool calls (products, bids, payouts) may have queued domain events: email them promptly.
+    if (request.method === 'POST') scheduleEmailProcessing(env, p => ctx.waitUntil(p));
+    return res;
   },
 };
 
@@ -45,6 +49,9 @@ function oauthProvider(env: Env) {
 
 const SCOPES = ['bip.products', 'bip.boosts', 'bip.wallet'];
 
+/** Projection pages and send batches per cron run: up to 200 emails, enough for a lock run. */
+const CRON_EMAIL_ROUNDS = 8;
+
 /** Run one housekeeping step; its failure is logged and never blocks the lock. */
 async function isolated(name: string, fn: () => Promise<unknown>) {
   try {
@@ -70,6 +77,8 @@ export async function scheduledJob(env: Env, nowMs = Date.now()) {
   await isolated('expireIntents', () => expireIntents(env.DB, nowMs));
   // Fallback for AI moderation jobs that failed or never ran inline (retries, stale runs, missing credentials at the time).
   await isolated('sweepPendingModeration', () => sweepPendingModeration(env, config(env), nowMs));
+  // Transactional email last, so it covers the lock results, vested commissions and moderation decisions above.
+  await isolated('processEmails', () => processEmails(env, nowMs, undefined, CRON_EMAIL_ROUNDS));
   return locks;
 }
 
