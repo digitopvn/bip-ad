@@ -52,7 +52,8 @@ One-time setup for a new environment:
 ```bash
 wrangler d1 create bip-ad-production && wrangler kv namespace create bip-ad-oauth-production   # put the ids in env.production
 pnpm db:migrate:production
-for s in GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET SESSION_SECRET OPERATOR_TOKEN; do wrangler secret put $s --env production; done
+for s in SESSION_SECRET OPERATOR_TOKEN; do wrangler secret put $s --env production; done
+scripts/set-oauth-secrets.sh production   # hidden prompts for GitHub/Google OAuth; stores them in `ak secrets` and on the worker
 pnpm deploy:production
 ```
 
