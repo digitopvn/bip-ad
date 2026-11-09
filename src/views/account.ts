@@ -1,4 +1,5 @@
 // Account overview. Read-only on the web: products are edited and payouts requested through MCP.
+import { type AccountEmailView, accountEmailSection } from './account-email-preferences-section';
 import { boardPath, copyField, productHref } from './components';
 import { boardLabel, formatIctDateTime, formatMoney, formatMoneyLine, formatRankUnits, formatSignedMoney, plural } from './format';
 import { html, imageUrl, type SafeHtml } from './html';
@@ -32,9 +33,9 @@ function walletTable(w: AccountView['wallet']): SafeHtml {
 }
 
 const sectionNav = (): SafeHtml =>
-  html`<nav class="acct-nav" aria-label="Account sections"><a href="#products">Products</a><a href="#payments">Payments</a><a href="#referrals">Referrals</a><a href="#wallet">Wallet</a><a href="#payouts">Payouts</a><a href="#mcp">MCP</a></nav>`;
+  html`<nav class="acct-nav" aria-label="Account sections"><a href="#products">Products</a><a href="#payments">Payments</a><a href="#referrals">Referrals</a><a href="#wallet">Wallet</a><a href="#payouts">Payouts</a><a href="#email">Email</a><a href="#mcp">MCP</a></nav>`;
 
-export function accountPage(ctx: LayoutContext, view: AccountView): string {
+export function accountPage(ctx: LayoutContext, view: AccountView, email?: AccountEmailView): string {
   const avatar = imageUrl(view.viewer.avatarUrl);
   const products = view.products.length
     ? html`<ul class="acct-products">${view.products.map(
@@ -137,6 +138,8 @@ export function accountPage(ctx: LayoutContext, view: AccountView): string {
       )} so far.</p>
       ${payouts}
     </section>
+
+    ${email ? accountEmailSection(email) : ''}
 
     <section class="acct-sec" id="mcp" aria-labelledby="mcp-title">
       <h2 id="mcp-title">Connect your agent</h2>
