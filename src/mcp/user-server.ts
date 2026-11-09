@@ -13,7 +13,7 @@ import { payoutStatus, requestPayout, walletBalances } from '../domain/wallet';
 import type { Env } from '../env';
 import { nextCutoffAfter, iso } from '../lib/time';
 import { jsonTool } from './common';
-import { createProviderCheckout } from '../payments/checkout';
+import { assertProviderEnabled, createProviderCheckout } from '../payments/checkout';
 import { moderateAfterChange } from '../moderation/ai-moderation-pipeline';
 
 const board = z.enum(['daily', 'weekly', 'monthly']);
@@ -114,6 +114,7 @@ export function userMcpServer(env: Env, userId: string, waitUntil: (p: Promise<u
   jsonTool(server, 'boosts.checkout', 'Create a checkout for a quote. Returns a URL the human must open to approve and pay. To use commission-wallet funds, pass wallet_amount_minor here or call wallet.apply_to_bid before the first checkout; the split is fixed once checkout starts. Rank changes only after the payment is verified.', {
     intent_id: z.string(), provider: z.enum(['paypal', 'sepay', 'wallet']), wallet_amount_minor: z.number().int().min(0).optional(),
   }, false, async a => {
+    assertProviderEnabled(env, cfg, a.provider);
     const r = await beginCheckout(db, cfg, userId, a.intent_id, a.provider, { walletMinor: a.wallet_amount_minor });
     const provider = a.provider !== 'wallet' && r.dueMinor > 0 ? await createProviderCheckout(env, cfg, r.intent, a.provider) : null;
     return { intent_id: r.intent.id, status: r.intent.status, checkout_url: r.checkoutUrl, due_minor: r.dueMinor, currency: r.intent.quote_currency, wallet_applied_minor: r.intent.wallet_applied_minor, payment_mode: cfg.paymentMode, provider_redirect: provider?.redirectUrl ?? null };

@@ -25,32 +25,16 @@ if [ ! -t 0 ]; then
   echo "This script reads values with hidden prompts and needs an interactive terminal. Run it in your own terminal." >&2
   exit 1
 fi
-ENV_UPPER="$(printf '%s' "$ENV_NAME" | tr '[:lower:]' '[:upper:]')"
-
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/store-worker-secret.sh
+source scripts/store-worker-secret.sh
 echo "Setting ${NAMES[*]} for $ENV_NAME (https://$HOST). Leave a value empty to skip it."
 
 for NAME in "${NAMES[@]}"; do
   read -r -s -p "$NAME: " VALUE; echo
   if [ -z "$VALUE" ]; then echo "  skipped"; continue; fi
 
-  REF="BIPAD_${NAME}_${ENV_UPPER}"
-  case "$NAME" in
-    AI_CLOUDFLARE_*) PROVIDER=cloudflare ;;
-    *) PROVIDER="$(printf '%s' "$NAME" | cut -d_ -f1 | tr '[:upper:]' '[:lower:]')" ;;
-  esac
-  # Rotate when the ref already exists, otherwise create it with a searchable profile.
-  if ak secrets get "$REF" -q >/dev/null 2>&1; then
-    printf '%s' "$VALUE" | ak secrets rotate "$REF" --value=- --no-interactive -q
-  else
-    printf '%s' "$VALUE" | ak secrets set "$REF" --value=- --no-interactive -q \
-      --project bip-ad --environment "$ENV_NAME" --provider "$PROVIDER" --usage-host "$HOST" \
-      --description "bip.ad $ENV_NAME worker secret $NAME"
-  fi
-  echo "  vault: $REF stored"
-
-  printf '%s' "$VALUE" | pnpm exec wrangler secret put "$NAME" --env="$WRANGLER_ENV" >/dev/null
-  echo "  worker: $NAME uploaded"
+  store_worker_secret "$NAME" "$VALUE"
   unset VALUE
 done
 

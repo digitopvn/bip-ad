@@ -12,6 +12,7 @@ import { failPayout, preparePayoutBatch, recordManualTransfer } from '../domain/
 import type { Env } from '../env';
 import { iso } from '../lib/time';
 import { jsonTool } from './common';
+import { emailProjectionBacklog } from '../email/email-projection-state';
 import { runModerationJob, scoresForMany } from '../moderation/ai-moderation-pipeline';
 
 const ACTOR = 'operator:grok';
@@ -34,12 +35,13 @@ export function operatorMcpServer(env: Env) {
   const cfg = config(env);
   const server = new McpServer({ name: 'bip-ad-operator', version: '0.1.0' });
 
-  jsonTool(server, 'operator.health', 'Queue depth, last lock, pending moderation and payout counts.', {}, true, async () => {
+  jsonTool(server, 'operator.health', 'Email projection backlog, last lock, pending moderation and payout counts.', {}, true, async () => {
     const q = async (sql: string) => (await db.prepare(sql).first<{ n: number }>())?.n ?? 0;
     return {
       payment_mode: cfg.paymentMode,
       pending_moderation: await q(`SELECT COUNT(*) AS n FROM products WHERE status = 'pending_review'`),
-      pending_outbox: await q(`SELECT COUNT(*) AS n FROM outbox_events WHERE status = 'pending'`),
+      // Domain events the email projector has not handled yet (it is their only consumer).
+      email_projection_backlog: await emailProjectionBacklog(db),
       open_payout_requests: await q(`SELECT COUNT(*) AS n FROM payout_requests WHERE state IN ('requested', 'batched')`),
       last_lock: await db.prepare(`SELECT resource_id, status, finished_at FROM job_runs WHERE job_type = 'daily_lock' ORDER BY resource_id DESC LIMIT 1`).first(),
       adapters: { video: 'mocked', social: 'mocked', ads: 'mocked' },

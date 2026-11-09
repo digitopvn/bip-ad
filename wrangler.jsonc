@@ -18,7 +18,9 @@
   "triggers": { "crons": ["12 20 * * *", "40 * * * *", "*/15 * * * *"] },
   "vars": {
     "PUBLIC_ORIGIN": "https://bip-ad.digitop-vn.workers.dev",
-    "PAYMENT_MODE": "simulated",
+    // Staging takes PayPal sandbox payments. A provider is offered only once its secrets are set
+    // (scripts/setup-paypal.sh), so SePay stays unavailable until it is configured.
+    "PAYMENT_MODE": "sandbox",
     "LIVE_PAYMENTS": "false",
     "MIN_BID_UNITS": "100",
     "MIN_BID_INCREMENT_UNITS": "100",
@@ -63,8 +65,10 @@
       "send_email": [{ "name": "EMAIL", "remote": true }],
       "vars": {
         "PUBLIC_ORIGIN": "https://bip.ad",
-        "PAYMENT_MODE": "simulated",
-        "LIVE_PAYMENTS": "false",
+        // Real money: live mode needs both flags. Approved by the owner on 2026-11-09 for PayPal only;
+        // SePay stays unavailable in production until its live secrets and URLs are set.
+        "PAYMENT_MODE": "live",
+        "LIVE_PAYMENTS": "true",
         "MIN_BID_UNITS": "100",
         "MIN_BID_INCREMENT_UNITS": "100",
         "FX_USD_VND": "25400",
@@ -81,7 +85,7 @@
         "MODERATION_LLM_PROVIDER": "cloudflare",
         "MODERATION_LLM_MODEL": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
         "MODERATION_APPROVE_MAX_RISK": "0.3",
-        "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
+        "PAYPAL_API_BASE": "https://api-m.paypal.com",
         "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
         "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init",
         "EMAIL_FROM": "bip.ad <hello@bip.ad>",

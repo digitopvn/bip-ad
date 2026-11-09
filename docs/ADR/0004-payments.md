@@ -14,13 +14,19 @@ Status: accepted for the MVP
 
 Any other non-empty value (for example `Live`) is a configuration error: the Worker fails closed instead of guessing.
 
-Real sandbox credentials were out of scope for this MVP. The sandbox and live paths are written from the provider docs and are tested only with simulated webhooks.
+`PAYMENT_MODE` switches every provider at once, so each provider is offered only when its secrets are set (`providerEnabled` in [`checkout.ts`](../../src/payments/checkout.ts)): PayPal needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` and `PAYPAL_WEBHOOK_ID`, and SePay needs `SEPAY_MERCHANT_ID`, `SEPAY_SECRET_KEY` and `SEPAY_IPN_SECRET`. The checkout page hides an unconfigured provider, and `/checkout/{id}/pay` and `boosts.checkout` refuse it before the intent changes. Simulated mode offers every provider.
+
+Environments (2026-11-09, owner-approved): staging runs `sandbox` against PayPal's sandbox, and production runs `live` with `PAYPAL_API_BASE=https://api-m.paypal.com`. SePay is set up in neither, so VND quotes can be paid only from the wallet. `scripts/setup-paypal.sh staging|production` reads the REST app credentials with hidden prompts, checks them against PayPal, creates or reuses the webhook for `https://{host}/api/webhooks/paypal`, and stores the three secrets in the AgentKit vault and on the worker. Neither database held simulated money when the mode changed; staging holds only the labelled sample boosts, which have no payments or ledger entries.
+
+Real sandbox credentials were out of scope for the MVP, so the sandbox and live paths were written from the provider docs and tested with simulated webhooks. PayPal is verified end to end on staging's sandbox before production takes live money.
 
 ## PayPal
 - Orders are created server-side with a `PayPal-Request-Id` header.
 - A payment is confirmed by either:
   - a webhook verified through `/v1/notifications/verify-webhook-signature`, or
   - the response of the server-side capture call.
+- The verification request carries the webhook body byte for byte (`verificationRequestBody` in [`paypal.ts`](../../src/payments/paypal.ts)), because PayPal checks the signature against the event exactly as it was sent.
+- PayPal's return redirect (`GET /checkout/{id}/paypal-return?token=…`) has no side effects. It renders a page whose button POSTs to `/checkout/{id}/paypal-capture`, and only that POST captures the order. Link prefetchers and previews that follow the return URL therefore cannot capture. The order token is the credential, so the POST does not need a session.
 - `PENDING` and `DENIED` captures never confirm a bid.
 - `REFUNDED` and `REVERSED` run the refund path. The capture is resolved through `links[rel=up]`.
 - A `REFUNDED` event carries that refund's own amount. A **partial refund keeps the bid**: it is recorded in `payment_reviews` for the operator, and the ledger is not changed automatically. When the recorded refunds of a capture add up to the captured cash, the whole payment is reversed like a full refund and those reviews are closed.

@@ -7,6 +7,7 @@ import { attributeSignup, getOrCreateReferralCode } from '../src/domain/referral
 import { freezeBoard, runLock } from '../src/domain/snapshot';
 import { preparePayoutBatch, recordManualTransfer, requestPayout, vestCommissions } from '../src/domain/wallet';
 import { savePreferences } from '../src/email/email-preferences';
+import { emailProjectionBacklog } from '../src/email/email-projection-state';
 import { newId } from '../src/lib/ids';
 import { cutoffAtOrBefore, DAY_MS, iso } from '../src/lib/time';
 import { bid, cfg, db, E, makeProduct, makeUser, realCfg } from './helpers';
@@ -195,5 +196,16 @@ describe('email projection: idempotence and eligibility', () => {
     expect((await emailsOf(none)).map(r => [r.status, r.skip_reason, r.to_address])).toEqual([['skipped', 'no_email', null]]);
     const rows = await emailsOf(out);
     expect(rows.map(r => [r.kind, r.status, r.skip_reason])).toEqual([['product_decision', 'skipped', 'opted_out'], ['bid_receipt', 'pending', null]]);
+  });
+});
+
+describe('email projection backlog (operator.health)', () => {
+  it('counts domain events the projector has not handled, and drops back once they are projected', async () => {
+    await projectAll();
+    const before = await emailProjectionBacklog(db());
+    await upsertUser(db(), { provider: 'github', providerUserId: newId('gh'), displayName: 'Backlog', avatarUrl: null, email: 'backlog@example.test' });
+    expect((await emailProjectionBacklog(db())).unhandled).toBe(before.unhandled + 1);
+    await projectAll();
+    expect(await emailProjectionBacklog(db())).toEqual(before);
   });
 });

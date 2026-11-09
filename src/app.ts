@@ -20,14 +20,14 @@ import { operatorMcpServer } from './mcp/operator-server';
 import { captureOrder, verifyWebhook } from './payments/paypal';
 import { normalizePayPal, normalizeSePay, processEvent, simulatePayment } from './payments/process';
 import { checkoutForm, verifyIpn } from './payments/sepay';
-import { createProviderCheckout } from './payments/checkout';
+import { assertProviderEnabled, createProviderCheckout } from './payments/checkout';
 import { scheduleEmailProcessing } from './email/process-emails';
 import { accountEmailView, registerEmailRoutes } from './routes/email-routes';
 import { accountView, boardView, checkoutView, homeView, layoutCtx, productView, snapshotView } from './routes/view-data';
 import { accountPage } from './views/account';
 import { authorizePage } from './views/authorize';
 import { boardPage } from './views/board';
-import { checkoutPage } from './views/checkout';
+import { checkoutPage, paypalReturnPage } from './views/checkout';
 import { errorPage } from './views/error';
 import { homePage } from './views/home';
 import { privacyPage } from './views/legal-privacy-page';
@@ -204,6 +204,7 @@ app.post('/checkout/:id/pay', async c => {
     if (method !== 'paypal' && method !== 'sepay') return c.redirect(`/checkout/${id}?r=error`, 303);
     const provider = method as Provider;
     if (PROVIDER_CURRENCY[provider] !== intent.quote_currency) return c.redirect(`/checkout/${id}?r=error`, 303);
+    assertProviderEnabled(c.env, cfg, provider);
     const r = await beginCheckout(c.env.DB, cfg, user.id, id, provider);
     if (cfg.paymentMode === 'simulated') {
       const s = await simulatePayment(c.env.DB, cfg, id, provider);
@@ -218,19 +219,30 @@ app.post('/checkout/:id/pay', async c => {
   }
 });
 
+// PayPal sends the payer back here with ?token=<order id>. A GET has no side effects (prefetchers
+// and link previews follow it too): it only shows a page whose POST captures the order.
 app.get('/checkout/:id/paypal-return', async c => {
+  const id = c.req.param('id');
+  const intent = await getIntent(c.env.DB, id);
+  const token = c.req.query('token');
+  if (!intent || config(c.env).paymentMode === 'simulated' || !token || token !== intent.provider_order_id) return c.redirect(`/checkout/${id}?r=error`, 303);
+  if (intent.status !== 'awaiting_payment') return c.redirect(`/checkout/${id}`, 303);
+  return page(c, 'Complete payment — bip.ad', ctx => paypalReturnPage(ctx, id, token));
+});
+
+// The order token is the credential: only the payer gets it from PayPal, and capturing completes a
+// payment the payer already approved, so no session is required (it may have expired at PayPal).
+app.post('/checkout/:id/paypal-capture', async c => {
   const id = c.req.param('id');
   const cfg = config(c.env);
   const intent = await getIntent(c.env.DB, id);
-  const token = c.req.query('token');
-  if (!intent || cfg.paymentMode === 'simulated' || !token || token !== intent.provider_order_id) return c.redirect(`/checkout/${id}?r=error`, 303);
+  const form = await c.req.parseBody();
+  const token = typeof form.token === 'string' ? form.token : '';
+  if (!intent || cfg.paymentMode === 'simulated' || !token || !intent.provider_order_id || !safeEqual(token, intent.provider_order_id)) return c.redirect(`/checkout/${id}?r=error`, 303);
   // The redirect alone proves nothing (A06); capture server-to-server and settle from PayPal's answer.
   const cap = await captureOrder(c.env, token);
   if (cap.capture?.status === 'COMPLETED' && cap.capture.custom_id === id) {
     const r = await processEvent(c.env.DB, cfg, normalizePayPal({ id: `capture:${cap.capture.id}`, event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: cap.capture.id, status: 'COMPLETED', custom_id: id, amount: cap.capture.amount } }));
-    // A GET skips the post-request email hook, so schedule the receipt email here once settled.
-    const wait = waitUntilOf(c);
-    if (wait) scheduleEmailProcessing(c.env, wait);
     return c.redirect(`/checkout/${id}?r=${r.status === 'settled' || r.status === 'duplicate' || r.status === 'replayed' ? 'paid' : 'success'}`, 303);
   }
   return c.redirect(`/checkout/${id}?r=success`, 303);
