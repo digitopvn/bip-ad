@@ -20,7 +20,7 @@ import { operatorMcpServer } from './mcp/operator-server';
 import { captureOrder, verifyWebhook } from './payments/paypal';
 import { normalizePayPal, normalizeSePay, processEvent, simulatePayment } from './payments/process';
 import { checkoutForm, verifyIpn } from './payments/sepay';
-import { createProviderCheckout } from './payments/checkout';
+import { assertProviderEnabled, createProviderCheckout } from './payments/checkout';
 import { scheduleEmailProcessing } from './email/process-emails';
 import { accountEmailView, registerEmailRoutes } from './routes/email-routes';
 import { accountView, boardView, checkoutView, homeView, layoutCtx, productView, snapshotView } from './routes/view-data';
@@ -196,6 +196,7 @@ app.post('/checkout/:id/pay', async c => {
     if (method !== 'paypal' && method !== 'sepay') return c.redirect(`/checkout/${id}?r=error`, 303);
     const provider = method as Provider;
     if (PROVIDER_CURRENCY[provider] !== intent.quote_currency) return c.redirect(`/checkout/${id}?r=error`, 303);
+    assertProviderEnabled(c.env, cfg, provider);
     const r = await beginCheckout(c.env.DB, cfg, user.id, id, provider);
     if (cfg.paymentMode === 'simulated') {
       const s = await simulatePayment(c.env.DB, cfg, id, provider);
