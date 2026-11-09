@@ -7,6 +7,7 @@
 # Values never touch disk, argv or shell history. Safe to re-run: an existing webhook is reused.
 #
 # Usage: scripts/setup-paypal.sh staging|production
+#   or:  PAYPAL_CLIENT_ID=… PAYPAL_CLIENT_SECRET=… scripts/setup-paypal.sh staging   (no prompts)
 #   staging:    a Sandbox app from developer.paypal.com (Apps & Credentials, Sandbox)
 #   production: a Live app of the PayPal Business account (Apps & Credentials, Live)
 set -euo pipefail
@@ -21,8 +22,12 @@ WEBHOOK_URL="https://$HOST/api/webhooks/paypal"
 # The events src/payments/process.ts handles; PENDING and DENIED are recorded and ignored.
 EVENTS='[{"name":"PAYMENT.CAPTURE.COMPLETED"},{"name":"PAYMENT.CAPTURE.REFUNDED"},{"name":"PAYMENT.CAPTURE.REVERSED"},{"name":"PAYMENT.CAPTURE.DENIED"},{"name":"PAYMENT.CAPTURE.PENDING"}]'
 
-if [ ! -t 0 ]; then
-  echo "This script reads values with hidden prompts and needs an interactive terminal. Run it in your own terminal." >&2
+# Non-interactive use: pass both values in the environment (for example from the vault), never as arguments.
+CLIENT_ID="${PAYPAL_CLIENT_ID:-}"
+CLIENT_SECRET="${PAYPAL_CLIENT_SECRET:-}"
+unset PAYPAL_CLIENT_ID PAYPAL_CLIENT_SECRET
+if { [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; } && [ ! -t 0 ]; then
+  echo "This script reads values with hidden prompts and needs an interactive terminal, or PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET in the environment." >&2
   exit 1
 fi
 cd "$(dirname "$0")/.."
@@ -30,8 +35,8 @@ cd "$(dirname "$0")/.."
 source scripts/store-worker-secret.sh
 
 echo "PayPal setup for $ENV_NAME ($API, webhook $WEBHOOK_URL)."
-read -r -s -p "PAYPAL_CLIENT_ID: " CLIENT_ID; echo
-read -r -s -p "PAYPAL_CLIENT_SECRET: " CLIENT_SECRET; echo
+[ -n "$CLIENT_ID" ] || { read -r -s -p "PAYPAL_CLIENT_ID: " CLIENT_ID; echo; }
+[ -n "$CLIENT_SECRET" ] || { read -r -s -p "PAYPAL_CLIENT_SECRET: " CLIENT_SECRET; echo; }
 [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ] || { echo "Both values are required." >&2; exit 1; }
 
 # curl reads credentials and the bearer token from a config on stdin, so they never reach argv.
