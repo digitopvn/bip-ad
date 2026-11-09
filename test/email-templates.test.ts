@@ -89,4 +89,23 @@ describe('email templates', () => {
     expect(renderEmail(all[0], mandatory).text).toContain('https://bip.ad/mcp');
     expect(renderEmail(all[2], grouped).text).toContain('products.submit');
   });
+  it('shows the bip.ad logo from an https origin and falls back to the wordmark otherwise', () => {
+    const https = renderEmail(all[0], mandatory).html;
+    expect(https).toContain('<img src="https://bip.ad/img/email-logo.png"');
+    expect(https).toContain('alt="bip.ad"');
+    const http = renderEmail(all[0], { ...mandatory, origin: 'http://localhost:8787' }).html;
+    expect(http).not.toContain('<img');
+    expect(http).toContain('bip<span');
+  });
+
+  it('welcome explains the product and how it works in HTML and text', () => {
+    const w = renderEmail(all[0], mandatory);
+    expect(w.html).toContain('How it works');
+    expect(w.text).toContain('HOW IT WORKS');
+    for (const step of ['Connect your AI agent', 'List your product', 'Bid for a seat', 'Lock at 03:12 ICT', 'Share your referral link']) {
+      expect(w.html).toContain(step);
+      expect(w.text).toContain(step);
+    }
+    expect(w.text).toContain('all-pay');
+  });
 });
