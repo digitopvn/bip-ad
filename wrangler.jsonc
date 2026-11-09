@@ -25,7 +25,14 @@
     "REFERRAL_ATTRIBUTION_DAYS": "30",
     "MIN_PAYOUT_USD_CENTS": "1000",
     "MIN_PAYOUT_VND": "250000",
-    "AUTO_APPROVE_PRODUCTS": "true",
+    // AI moderation scores every submission and edit; low-risk ones publish automatically (see ADR-0008).
+    "MODERATION_MODE": "ai",
+    "MODERATION_DECISION_PROVIDER": "cloudflare",
+    "MODERATION_DECISION_MODEL_FAST": "clef",
+    "MODERATION_DECISION_MODEL": "clef",
+    "MODERATION_LLM_PROVIDER": "cloudflare",
+    "MODERATION_LLM_MODEL": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "MODERATION_APPROVE_MAX_RISK": "0.3",
     "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
     "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
     "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init"
@@ -59,8 +66,14 @@
         "REFERRAL_ATTRIBUTION_DAYS": "30",
         "MIN_PAYOUT_USD_CENTS": "1000",
         "MIN_PAYOUT_VND": "250000",
-        // Production products wait for the operator's agent to approve them over /operator/mcp (products.pending, products.moderate).
-        "AUTO_APPROVE_PRODUCTS": "false",
+        // AI moderation auto-approves low-risk changes; everything else waits for the operator over /operator/mcp.
+        "MODERATION_MODE": "ai",
+        "MODERATION_DECISION_PROVIDER": "cloudflare",
+        "MODERATION_DECISION_MODEL_FAST": "clef",
+        "MODERATION_DECISION_MODEL": "clef",
+        "MODERATION_LLM_PROVIDER": "cloudflare",
+        "MODERATION_LLM_MODEL": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+        "MODERATION_APPROVE_MAX_RISK": "0.3",
         "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
         "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
         "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init"

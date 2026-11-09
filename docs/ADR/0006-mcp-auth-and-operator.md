@@ -18,7 +18,7 @@ Status: accepted
 - Operator tools cannot edit balances. Every money movement goes through audited domain functions and writes to `decision_logs`.
 
 ## Moderation of edits
-- Edits to a published product, and new page versions, go live only when `AUTO_APPROVE_PRODUCTS=true` and the automated screen passes. Otherwise they wait as `pending_edit_json` / `pending_page_version_id` until the operator approves. `products.pending` lists submissions and pending changes with the product version and the page that approval would publish. Every approval requires that version, and every field edit, page draft or page publish bumps it, so the operator approves exactly what they reviewed. Version errors do not reveal the current version: the operator lists and reviews again.
+- Edits to a published product, and new page versions, go live only after moderation passes (`MODERATION_MODE`, see [ADR-0008](0008-ai-moderation.md)). Otherwise they wait as `pending_edit_json` / `pending_page_version_id` until the operator approves. `products.pending` lists submissions and pending changes with the product version and the page that approval would publish. Every approval requires that version, and every field edit, page draft or page publish bumps it, so the operator approves exactly what they reviewed. Version errors do not reveal the current version: the operator lists and reviews again.
 - Rejecting the pending changes of a suspended product keeps it suspended.
 - Suspending a product removes it from every snapshot whose media is not final (`removed_from_publication`), with a decision log per snapshot.
 

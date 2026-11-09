@@ -7,6 +7,7 @@ import { vestCommissions } from './domain/wallet';
 import type { Env, McpProps } from './env';
 import { serveMcp } from './mcp/common';
 import { userMcpServer } from './mcp/user-server';
+import { sweepPendingModeration } from './moderation/ai-moderation-pipeline';
 
 /** /mcp: reached only with a valid OAuth access token; the provider puts the grant props on ctx.props. */
 const mcpApi = {
@@ -15,7 +16,7 @@ const mcpApi = {
     if (!userId) return new Response('unauthorized', { status: 401 });
     const user = await env.DB.prepare('SELECT status FROM users WHERE id = ?').bind(userId).first<{ status: string }>();
     if (!user || user.status !== 'active') return new Response('account suspended', { status: 403 });
-    return serveMcp(userMcpServer(env, userId), request);
+    return serveMcp(userMcpServer(env, userId, p => ctx.waitUntil(p)), request);
   },
 };
 
@@ -67,6 +68,8 @@ export async function scheduledJob(env: Env, nowMs = Date.now()) {
   }
   await isolated('vestCommissions', () => vestCommissions(env.DB, nowMs));
   await isolated('expireIntents', () => expireIntents(env.DB, nowMs));
+  // Fallback for AI moderation jobs that failed or never ran inline (retries, stale runs, missing credentials at the time).
+  await isolated('sweepPendingModeration', () => sweepPendingModeration(env, config(env), nowMs));
   return locks;
 }
 

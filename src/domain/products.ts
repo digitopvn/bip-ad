@@ -94,7 +94,7 @@ export async function createProduct(db: D1Database, userId: string, input: Produ
 
 /**
  * Edit product fields. Unpublished products change directly. A published product keeps its live
- * fields until the edit passes moderation: auto-approved only when AUTO_APPROVE_PRODUCTS is on and
+ * fields until the edit passes moderation: auto-approved inline only in MODERATION_MODE=screen when
  * the screen passes, otherwise stored as pending_edit_json for the operator.
  */
 export async function updateProduct(db: D1Database, cfg: Config, userId: string, productId: string, patch: Partial<ProductInput>, expectedVersion?: number, nowMs = Date.now()) {
@@ -171,7 +171,8 @@ export async function submitProduct(db: D1Database, cfg: Config, userId: string,
   const reasons = [...screen.reasons.filter(r => r !== 'AUTO_SCREEN_PASSED'), ...page.reasons.filter(r => r !== 'AUTO_SCREEN_PASSED')];
   const publish = cfg.autoApprove && screen.decision === 'allow' && page.decision === 'allow';
   await db.batch([
-    db.prepare(`UPDATE products SET status = ?, published_at = CASE WHEN ? THEN COALESCE(published_at, ?) ELSE published_at END, updated_at = ? WHERE id = ?`)
+    // The version moves on every submission so a resubmission is scored and approved as its own version.
+    db.prepare(`UPDATE products SET status = ?, published_at = CASE WHEN ? THEN COALESCE(published_at, ?) ELSE published_at END, version = version + 1, updated_at = ? WHERE id = ?`)
       .bind(publish ? 'published' : 'pending_review', publish ? 1 : 0, now, now, p.id),
     // Approve the latest page draft together with the product so the public page is never empty.
     ...(publish ? publishLatestPageStatements(db, p.id, now) : []),
@@ -203,9 +204,11 @@ function approvePageStatements(db: D1Database, productId: string, pageVersionId:
  * - reject: a published product keeps its live version and loses its pending changes; otherwise it is rejected;
  * - suspend: unpublish, and remove it from every snapshot whose media is not final (A17).
  */
-export async function moderateProduct(db: D1Database, actor: string, productId: string, decision: 'approve' | 'reject' | 'suspend', reason: string, nowMs = Date.now(), expectedVersion?: number) {
+export async function moderateProduct(db: D1Database, actor: string, productId: string, decision: 'approve' | 'reject' | 'suspend', reason: string, nowMs = Date.now(), expectedVersion?: number, approvableStatuses?: ProductRow['status'][]) {
   const p = await getProduct(db, productId);
   if (!p) throw notFound('Product not found');
+  // Automated approvals pass the statuses they may act on, so they can never lift a suspension or a rejection.
+  if (approvableStatuses && !approvableStatuses.includes(p.status)) throw new DomainError('status_conflict', `Product is ${p.status}`, 409);
   // Approving pending changes must approve exactly what the operator reviewed: the owner could
   // swap the pending edit or page between the review and the approval.
   if (decision === 'approve' && expectedVersion === undefined) {
@@ -216,8 +219,10 @@ export async function moderateProduct(db: D1Database, actor: string, productId: 
   // A suspended product stays suspended when its pending changes are rejected.
   const status = decision === 'approve' ? 'published' : decision === 'suspend' ? 'suspended' : p.status === 'published' || p.status === 'suspended' ? p.status : 'rejected';
   const stmts: D1PreparedStatement[] = [
-    guardStatement(db, 'EXISTS (SELECT 1 FROM products WHERE id = ? AND version = ?)', p.id, p.version),
-    db.prepare(`UPDATE products SET status = ?, published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, ?) ELSE published_at END, updated_at = ? WHERE id = ?`)
+    // The guard also pins the status, so a decision taken on what was read cannot overwrite a newer one.
+    guardStatement(db, 'EXISTS (SELECT 1 FROM products WHERE id = ? AND version = ? AND status = ?)', p.id, p.version, p.status),
+    // Every decision moves the version: anything reviewed before it (by the operator or the AI) is stale.
+    db.prepare(`UPDATE products SET status = ?, published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, ?) ELSE published_at END, version = version + 1, updated_at = ? WHERE id = ?`)
       .bind(status, status, now, now, p.id),
   ];
   if (decision === 'approve') {
@@ -269,6 +274,7 @@ export async function pendingModeration(db: D1Database) {
 
 export async function setBlocks(db: D1Database, userId: string, productId: string, blocks: unknown, nowMs = Date.now()) {
   const p = await ownedProduct(db, userId, productId);
+  if (p.status === 'suspended') throw new DomainError('suspended', 'Suspended products cannot be edited', 409);
   const v = validateBlocks(blocks);
   if (!v.ok) return { ok: false as const, issues: v.issues };
   const now = iso(nowMs);
@@ -294,10 +300,11 @@ export async function setBlocks(db: D1Database, userId: string, productId: strin
 /**
  * Publish a page version. Before the product is public the owner may switch versions (the product
  * itself still goes through submission). For a published product the version goes live only when
- * AUTO_APPROVE_PRODUCTS is on and the page screen passes; otherwise it waits for the operator.
+ * MODERATION_MODE=screen and the page screen passes; otherwise it waits for the AI job or the operator.
  */
 export async function publishPage(db: D1Database, cfg: Config, userId: string, productId: string, version: number | undefined, nowMs = Date.now()) {
   const p = await ownedProduct(db, userId, productId);
+  if (p.status === 'suspended') throw new DomainError('suspended', 'Suspended products cannot be edited', 409);
   const row = await db.prepare(`SELECT id, version, blocks_json FROM product_page_versions WHERE product_id = ? ${version ? 'AND version = ?' : ''} ORDER BY version DESC LIMIT 1`)
     .bind(...(version ? [p.id, version] : [p.id])).first<{ id: string; version: number; blocks_json: string }>();
   if (!row) throw notFound('No page version to publish; call pages.set_blocks first');
