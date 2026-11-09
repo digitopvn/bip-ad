@@ -11,7 +11,9 @@ export type Block =
   | { t: 'facts'; rows: [label: string, value: Cell][] }
   | { t: 'table'; head: string[]; rows: Cell[][] }
   | { t: 'note'; text: string }
-  | { t: 'code'; text: string };
+  | { t: 'code'; text: string }
+  | { t: 'h2'; text: string }
+  | { t: 'steps'; items: [title: string, detail: string][] };
 
 export interface EmailDoc {
   /** Subject without the environment prefix. */
@@ -68,6 +70,20 @@ function blockHtml(b: Block): string {
       return `<p style="${p}">${esc(b.text)}</p>`;
     case 'note':
       return `<div style="margin:0 0 16px;padding:12px 14px;background:${C.noteBg};border-left:4px solid ${C.accent};border-radius:6px;font:14px/1.5 ${FONT};color:${C.ink}">${esc(b.text)}</div>`;
+    case 'h2':
+      return `<h2 style="margin:24px 0 12px;font:700 17px/1.3 ${FONT};color:${C.ink}">${esc(b.text)}</h2>`;
+    case 'steps':
+      return (
+        `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px">` +
+        b.items
+          .map(
+            ([title, detail], i) =>
+              `<tr><td width="34" style="padding:0 10px 14px 0;vertical-align:top"><div style="width:26px;height:26px;border-radius:13px;background:${C.brand};color:#ffffff;font:700 13px/26px ${FONT};text-align:center">${i + 1}</div></td>` +
+              `<td style="padding:2px 0 14px;vertical-align:top;font:15px/1.5 ${FONT};color:${C.ink}"><strong>${esc(title)}</strong><br><span style="color:${C.muted}">${esc(detail)}</span></td></tr>`,
+          )
+          .join('') +
+        '</table>'
+      );
     case 'code':
       return `<p style="margin:0 0 16px;padding:10px 12px;background:${C.noteBg};border-radius:6px;font:14px/1.4 Menlo,Consolas,monospace;color:${C.ink};word-break:break-all">${esc(b.text)}</p>`;
     case 'facts':
@@ -96,6 +112,8 @@ function blockHtml(b: Block): string {
 
 function blockText(b: Block): string {
   if (b.t === 'p' || b.t === 'note' || b.t === 'code') return b.text;
+  if (b.t === 'h2') return b.text.toUpperCase();
+  if (b.t === 'steps') return b.items.map(([title, detail], i) => `${i + 1}. ${title}\n   ${detail}`).join('\n');
   if (b.t === 'facts') return b.rows.map(([k, v]) => `${k}: ${cellPlain(v)}`).join('\n');
   return [b.head.join(' | '), ...b.rows.map((r) => r.map(cellPlain).join(' | '))].join('\n');
 }
@@ -108,6 +126,16 @@ function footerParts(ctx: EmailRenderContext) {
       ? 'This is a transactional notice about your bip.ad account, so it is sent regardless of your email preferences.'
       : 'You are receiving this because of your notification settings on bip.ad.';
   return { prefs, unsub, grouped: ctx.unsubscribeUrl !== null, lead };
+}
+
+/** Logo (served from the app's own origin, https only) next to the wordmark; text-only when no logo URL is safe. */
+function brandHeader(ctx: EmailRenderContext): string {
+  const logo = safeHref(`${ctx.origin.replace(/\/+$/, '')}/img/email-logo.png`);
+  const word = `<span style="font:800 22px/40px ${FONT};color:${C.ink};letter-spacing:-0.3px">bip<span style="color:${C.accent}">.</span>ad</span>`;
+  const img = logo && logo.startsWith('https://')
+    ? `<td style="padding:0 10px 0 0;vertical-align:middle"><img src="${esc(logo)}" width="40" height="40" alt="bip.ad" style="display:block;border:0;border-radius:10px"></td>`
+    : '';
+  return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px"><tr>${img}<td style="vertical-align:middle">${word}</td></tr></table>`;
 }
 
 /** Renders a document into the final subject, HTML and plain text. */
@@ -127,7 +155,7 @@ export function renderDoc(doc: EmailDoc, ctx: EmailRenderContext): RenderedEmail
     `<body style="margin:0;padding:0;background:${C.bg}"><div style="display:none;max-height:0;overflow:hidden;opacity:0">${esc(doc.preheader)}</div>` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg}"><tr><td align="center" style="padding:24px 12px">` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:${C.card};border:1px solid ${C.line};border-radius:12px"><tr><td style="padding:28px 28px 8px">` +
-    `<div style="font:800 22px/1 ${FONT};color:${C.brand};margin:0 0 22px">bip.ad</div>` +
+    brandHeader(ctx) +
     `<h1 style="margin:0 0 16px;font:700 21px/1.3 ${FONT};color:${C.ink}">${esc(doc.heading)}</h1>` +
     doc.blocks.map(blockHtml).join('') +
     button +
