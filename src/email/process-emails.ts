@@ -1,11 +1,11 @@
 // Entry point of transactional email: project new domain events, then send due emails.
-// Runs from the cron and, right after mutating requests, from waitUntil. It never throws: a failed
-// step is logged and retried by the next run.
+// Runs from its own 15-minute cron and, right after mutating requests, from waitUntil. It never
+// throws: a failed step is logged and retried by the next run.
 import { config } from '../domain/config';
 import type { Env } from '../env';
 import { iso } from '../lib/time';
 import { meteredDb, QueryBudget } from './d1-query-meter';
-import { acquireProjectionLease, hasProjectionWorkSql, releaseProjectionLease } from './email-projection-state';
+import { acquireProjectionLease, hasProjectionWorkSql, hasUnseenEvents, releaseProjectionLease } from './email-projection-state';
 import { PROJECTION_PAGE_SIZE, type ProjectionResult, projectEmailEvents } from './email-projector';
 import { hasDueEmailsSql, SEND_LEASE_MS, type SendResult, sendDueEmails } from './email-sender';
 import { bindingTransport, type EmailTransport, parseFromAddress } from './email-transport';
@@ -16,14 +16,21 @@ export interface RunProfile {
   rounds: number;
   /** Emails per send batch. */
   sendLimit: number;
-  /** Queries this run may issue; the invocation that scheduled it keeps the rest. */
+  /** Queries this run may issue. */
   queryCap: number;
 }
 
-/** After a request (waitUntil): one page and a few emails; bulk work is left to the cron. */
+/** After a request (waitUntil): one page and a few emails, leaving the request most of the query limit. */
 export const REQUEST_RUN: RunProfile = { rounds: 1, sendLimit: 5, queryCap: 150 };
-/** Cron: drains a large lock run while staying well under the 1000-query limit. */
-export const CRON_RUN: RunProfile = { rounds: 8, sendLimit: 25, queryCap: 600 };
+/** The email cron owns its invocation; 800 leaves headroom under the 1000-query limit. */
+export const CRON_RUN: RunProfile = { rounds: 8, sendLimit: 25, queryCap: 800 };
+/** waitUntil work may be cancelled about 30 s after the response; a request run plans for 20 s. */
+export const REQUEST_RUN_WINDOW_MS = 20_000;
+/** Extra pages a caught-up run may project for events written while it worked, before releasing the lease. */
+const MAX_LEASE_RECHECKS = 2;
+
+/** Deadline of a request run whose waitUntil work starts at `startedAtMs`. */
+export const requestRunDeadline = (startedAtMs = Date.now()) => startedAtMs + REQUEST_RUN_WINDOW_MS;
 
 export interface ProcessEmailsResult {
   idle: boolean;
@@ -57,33 +64,59 @@ async function hasWork(db: D1Database, nowMs: number) {
   return r?.busy === 1;
 }
 
-async function project(env: Env, origin: string, nowMs: number, budget: QueryBudget, profile: RunProfile, out: ProcessEmailsResult) {
-  const db = meteredDb(env.DB, budget);
-  const lease = await step('projection lease', () => acquireProjectionLease(db, nowMs));
-  if (lease === null) {
-    out.projectionSkipped = true;
-    return;
-  }
-  let afterSeq: number | undefined;
-  for (let i = 0; i < profile.rounds; i++) {
-    const r = await step('projection', () => projectEmailEvents(env.DB, origin, nowMs, { budget, afterSeq }));
-    if (!r) break;
-    out.projection = out.projection ? sum(out.projection, r) : r;
-    if (r.budgetExhausted || r.events < PROJECTION_PAGE_SIZE) break;
-    // Deferred events stay below the cursor; the next page starts past everything this run saw.
-    afterSeq = r.lastSeq;
-  }
-  await step('projection lease release', () => releaseProjectionLease(db, lease));
+export interface ProjectionRunOptions {
+  budget: QueryBudget;
+  rounds: number;
+  /** Wall-clock instant after which no new page starts. */
+  deadlineMs?: number;
+  /** Called after each page (observability and tests). */
+  onPage?: (r: ProjectionResult) => Promise<void>;
 }
 
 /**
- * One bounded run. `nowMs` is the instant used for due checks and timestamps; callers pass the
- * current time (the default), never a stale job-start time.
+ * Project up to `rounds` pages under the projection lease; skipped when another run holds it.
+ * A run that caught up looks once more for events written meanwhile before giving the lease back,
+ * so an event whose own run was skipped because of the lease is not left for the cron.
  */
-export async function processEmails(env: Env, nowMs = Date.now(), transport?: EmailTransport, profile: RunProfile = REQUEST_RUN): Promise<ProcessEmailsResult> {
+export async function projectUnderLease(rawDb: D1Database, origin: string, nowMs: number, o: ProjectionRunOptions) {
+  const db = meteredDb(rawDb, o.budget);
+  const lease = await step('projection lease', () => acquireProjectionLease(db, nowMs));
+  if (lease === null) return { skipped: true, projection: null };
+  const timeLeft = () => o.deadlineMs === undefined || Date.now() < o.deadlineMs;
+  let projection: ProjectionResult | null = null;
+  let afterSeq: number | undefined;
+  let pages = 0;
+  let rechecks = 0;
+  while (timeLeft()) {
+    const r = await step('projection', () => projectEmailEvents(rawDb, origin, nowMs, { budget: o.budget, afterSeq }));
+    if (!r) break;
+    pages++;
+    projection = projection ? sum(projection, r) : r;
+    await o.onPage?.(r);
+    if (r.budgetExhausted) break;
+    // The next page starts past everything this run saw; deferred events stay below the cursor.
+    afterSeq = r.lastSeq;
+    if (r.events === PROJECTION_PAGE_SIZE) {
+      if (pages < o.rounds) continue;
+      break;
+    }
+    if (rechecks++ >= MAX_LEASE_RECHECKS || !o.budget.allows(2) || !timeLeft()) break;
+    if (!(await step('projection recheck', () => hasUnseenEvents(db)))) break;
+  }
+  await step('projection lease release', () => releaseProjectionLease(db, lease));
+  return { skipped: false, projection };
+}
+
+/**
+ * One bounded run. `nowMs` is the instant used for due checks and timestamps (callers pass the
+ * current time). `deadlineMs` is when the platform may cancel the run: no page or send starts
+ * too close to it.
+ */
+export async function processEmails(env: Env, nowMs = Date.now(), transport?: EmailTransport, profile: RunProfile = REQUEST_RUN, deadlineMs?: number): Promise<ProcessEmailsResult> {
   const budget = new QueryBudget(profile.queryCap);
   const out: ProcessEmailsResult = { idle: false, projectionSkipped: false, projection: null, sending: null, queriesUsed: 0 };
   const done = () => ({ ...out, queriesUsed: budget.used });
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) return done();
   const busy = await step('probe', () => hasWork(meteredDb(env.DB, budget), nowMs));
   if (busy === false) {
     out.idle = true;
@@ -91,7 +124,9 @@ export async function processEmails(env: Env, nowMs = Date.now(), transport?: Em
   }
   const origin = await step('config', async () => config(env).origin);
   if (!origin) return done();
-  await project(env, origin, nowMs, budget, profile, out);
+  const p = await projectUnderLease(env.DB, origin, nowMs, { budget, rounds: profile.rounds, deadlineMs });
+  out.projectionSkipped = p.skipped;
+  out.projection = p.projection;
 
   const t = transport ?? (env.EMAIL ? bindingTransport(env.EMAIL) : null);
   const from = parseFromAddress(env.EMAIL_FROM);
@@ -100,10 +135,10 @@ export async function processEmails(env: Env, nowMs = Date.now(), transport?: Em
   else {
     const replyTo = env.EMAIL_REPLY_TO?.trim() || undefined;
     for (let i = 0; i < profile.rounds; i++) {
-      const r = await step('sending', () => sendDueEmails(env.DB, t, { origin, from, replyTo, nowMs, limit: profile.sendLimit, budget }));
+      const r = await step('sending', () => sendDueEmails(env.DB, t, { origin, from, replyTo, nowMs, limit: profile.sendLimit, budget, deadlineMs }));
       if (!r) break;
       out.sending = out.sending ? sum(out.sending, r) : r;
-      if (r.claimed < profile.sendLimit) break;
+      if (r.claimed < profile.sendLimit || r.released > 0) break;
     }
   }
   return done();
@@ -112,7 +147,7 @@ export async function processEmails(env: Env, nowMs = Date.now(), transport?: Em
 /** Schedule a short run after the response without delaying or failing the request. */
 export function scheduleEmailProcessing(env: Env, waitUntil: (p: Promise<unknown>) => void) {
   try {
-    waitUntil(processEmails(env));
+    waitUntil(processEmails(env, Date.now(), undefined, REQUEST_RUN, requestRunDeadline()));
   } catch (e) {
     console.error('email: could not schedule processing', e);
   }

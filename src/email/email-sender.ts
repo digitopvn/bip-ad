@@ -18,6 +18,8 @@ export const SEND_BATCH_SIZE = 25;
 /** Claim batch + preferences batch + one spare, on top of one outcome write per claimed row. */
 const SEND_QUERY_OVERHEAD = 3;
 const MAX_ERROR_LENGTH = 500;
+/** No claim or send starts with less than this left before the run's deadline (send + outcome write). */
+export const SEND_DEADLINE_MARGIN_MS = 5_000;
 
 export interface SenderOptions {
   origin: string;
@@ -26,6 +28,8 @@ export interface SenderOptions {
   nowMs?: number;
   limit?: number;
   budget?: QueryBudget;
+  /** Wall-clock instant (Date.now()) after which the platform may cancel the run, e.g. waitUntil after a response. */
+  deadlineMs?: number;
 }
 
 interface ClaimedRow {
@@ -53,6 +57,8 @@ export interface SendResult {
   skipped: number;
   retried: number;
   failed: number;
+  /** Claimed but handed back unsent because the deadline came too close. */
+  released: number;
 }
 
 /** True when the sender has work (binds ?1 = now, ?2 = lease expiry): a due pending row or an expired lease. */
@@ -115,9 +121,11 @@ function compose(row: ClaimedRow, prefs: PreferencesRow, o: SenderOptions): Outg
 export async function sendDueEmails(rawDb: D1Database, transport: EmailTransport, o: SenderOptions): Promise<SendResult> {
   const budget = o.budget ?? unmetered();
   const db = meteredDb(rawDb, budget);
-  const out: SendResult = { claimed: 0, sent: 0, skipped: 0, retried: 0, failed: 0 };
+  const out: SendResult = { claimed: 0, sent: 0, skipped: 0, retried: 0, failed: 0, released: 0 };
   const limit = Math.min(o.limit ?? SEND_BATCH_SIZE, budget.remaining - SEND_QUERY_OVERHEAD);
-  if (limit <= 0) return out;
+  // A run cancelled between send and the outcome write would send the email again later.
+  const timeLeft = () => o.deadlineMs === undefined || Date.now() <= o.deadlineMs - SEND_DEADLINE_MARGIN_MS;
+  if (limit <= 0 || !timeLeft()) return out;
   const nowMs = o.nowMs ?? Date.now();
   const now = iso(nowMs);
   const rows = await claim(db, now, iso(nowMs - SEND_LEASE_MS), limit);
@@ -125,6 +133,12 @@ export async function sendDueEmails(rawDb: D1Database, transport: EmailTransport
   if (!rows.length) return out;
   const prefs = await preferencesOf(db, rows.map(r => r.user_id), now);
   for (const row of rows) {
+    if (!timeLeft()) {
+      // Hand the row back as it was (still due), so the next run sends it without waiting for the lease.
+      await finish(db, row, `status = 'pending', attempts = attempts - 1, updated_at = ?`, now).catch(e => console.error(`email ${row.id}: releasing the claim failed`, e));
+      out.released++;
+      continue;
+    }
     let messageId: string;
     try {
       const p = prefs.get(row.user_id);

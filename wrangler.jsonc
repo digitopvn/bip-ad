@@ -14,7 +14,8 @@
   // Cloudflare Email Service: transactional email (welcome, receipts, moderation decisions, lock results).
   "send_email": [{ "name": "EMAIL", "remote": true }],
   // 03:12 ICT (UTC+7, no DST) = 20:12 UTC on the previous day. The hourly run vests commissions, expires quotes and catches up a missed lock (idempotent).
-  "triggers": { "crons": ["12 20 * * *", "40 * * * *"] },
+  // The 15-minute run only sends email, in its own invocation so it never shares the D1 query limit with the lock. Environments inherit these triggers.
+  "triggers": { "crons": ["12 20 * * *", "40 * * * *", "*/15 * * * *"] },
   "vars": {
     "PUBLIC_ORIGIN": "https://bip-ad.digitop-vn.workers.dev",
     "PAYMENT_MODE": "simulated",

@@ -14,6 +14,14 @@ export class QueryBudget {
   }
 }
 
+/** Thrown by a step that would not fit in the budget; the caller stops and leaves the rest for the next run. */
+export class QueryBudgetExhausted extends Error {
+  constructor() {
+    super('email run query budget exhausted');
+    this.name = 'QueryBudgetExhausted';
+  }
+}
+
 /** Unlimited budget for direct calls (tests, scripts). */
 export const unmetered = () => new QueryBudget(Number.MAX_SAFE_INTEGER);
 

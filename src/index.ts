@@ -74,15 +74,27 @@ export async function scheduledJob(env: Env, nowMs = Date.now()) {
   await isolated('expireIntents', () => expireIntents(env.DB, nowMs));
   // Fallback for AI moderation jobs that failed or never ran inline (retries, stale runs, missing credentials at the time).
   await isolated('sweepPendingModeration', () => sweepPendingModeration(env, config(env), nowMs));
-  // Transactional email last, so it covers the lock results, vested commissions and moderation decisions above.
-  // The current time, not nowMs: the steps above may have taken a while and leases/backoff are wall-clock.
-  await isolated('processEmails', () => processEmails(env, Date.now(), undefined, CRON_RUN));
+  return locks;
+}
+
+/** Cron of the email run (wrangler.jsonc triggers). Its own invocation, so it never shares the D1 query limit with the lock. */
+export const EMAIL_CRON = '*/15 * * * *';
+
+/** Route a cron invocation: the email cron only processes email; the others run the lock and housekeeping. */
+export async function runScheduled(cron: string, env: Env) {
+  if (cron === EMAIL_CRON) {
+    const r = await processEmails(env, Date.now(), undefined, CRON_RUN);
+    console.log('email run', JSON.stringify({ projection: r.projection, sending: r.sending, queries: r.queriesUsed }));
+    return r;
+  }
+  const locks = await scheduledJob(env);
+  console.log('lock run', JSON.stringify(locks.map(x => ({ cutoff: x.cutoffAt, skipped: x.skipped }))));
   return locks;
 }
 
 export default {
   fetch: (req: Request, env: Env, ctx: ExecutionContext) => oauthProvider(env).fetch(req, env, ctx),
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(scheduledJob(env).then(r => console.log('lock run', JSON.stringify(r.map(x => ({ cutoff: x.cutoffAt, skipped: x.skipped }))))));
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runScheduled(controller.cron, env));
   },
 } satisfies ExportedHandler<Env>;

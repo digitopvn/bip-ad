@@ -7,7 +7,7 @@
 // retried by the hourly cron and never approve anything.
 import type { Config } from '../domain/config';
 import { DomainError } from '../domain/errors';
-import { processEmails } from '../email/process-emails';
+import { processEmails, REQUEST_RUN, requestRunDeadline } from '../email/process-emails';
 import { decisionStatement } from '../domain/ledger';
 import { moderateProduct, moderationScreen, pageScreen } from '../domain/products';
 import type { Env } from '../env';
@@ -248,8 +248,11 @@ export async function moderateAfterChange(env: Env, cfg: Config, productId: stri
     await finishJob(db, s.productId, s.version, 'done', 'fast stage deferred');
     return { state: 'needs_operator', reasons: fast.reasons };
   }
-  // The verdict may approve or reject the product: send that email once the stage has settled.
-  waitUntil(runFullSafely(db, cfg, deps, s).then(() => processEmails(env)));
+  // The verdict may approve or reject the product: email it once the stage settles. The deadline
+  // counts from now, when the waitUntil work starts, so after a slow AI stage this run only
+  // projects (or does nothing) and the email cron sends.
+  const emailDeadline = requestRunDeadline();
+  waitUntil(runFullSafely(db, cfg, deps, s).then(() => processEmails(env, Date.now(), undefined, REQUEST_RUN, emailDeadline)));
   return { state: 'scoring', reasons: fast.reasons };
 }
 

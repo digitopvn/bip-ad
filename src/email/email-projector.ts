@@ -11,50 +11,19 @@
 //   and projection_high records how far the projector has looked, so they are not pending work.
 import { newId } from '../lib/ids';
 import { iso } from '../lib/time';
-import { type QueryBudget, meteredDb, unmetered } from './d1-query-meter';
+import { type QueryBudget, QueryBudgetExhausted, meteredDb, unmetered } from './d1-query-meter';
 import { mapEvent } from './email-event-mapping';
-import { EMAIL_KIND_GROUP, type EmailGroup } from './email-message-types';
+import { EMAIL_KIND_GROUP } from './email-message-types';
 import { preferencesInsertStatement } from './email-preferences';
 import {
   advanceHighStatement, catchUpCursorStatement, DEFER_RETRY_MS, deferralStatement, FAILURE_RETRY_MS, MAX_EVENT_FAILURES, projectionSettings, receiptStatements,
 } from './email-projection-state';
 import type { EmailDraft, OutboxEvent } from './email-projection-types';
+import { type Recipient, recipientCache } from './email-recipient-cache';
 
 export const PROJECTION_PAGE_SIZE = 50;
 /** Queries one event may need (mapping, lock snapshots, recipients) plus the final batch. */
 const EVENT_QUERY_RESERVE = 8;
-/** D1 allows 100 bound parameters per query. */
-const IN_CHUNK = 90;
-
-interface Recipient {
-  displayName: string;
-  email: string | null;
-  /** null when the user has no preferences row yet (every group on). */
-  groups: Record<EmailGroup, boolean> | null;
-}
-
-/** Users with their preferences, loaded in one query per chunk of ids and cached for the page. */
-function recipientCache(db: D1Database) {
-  const cache = new Map<string, Recipient | null>();
-  async function load(ids: string[]) {
-    const missing = [...new Set(ids)].filter(id => !cache.has(id));
-    for (let i = 0; i < missing.length; i += IN_CHUNK) {
-      const chunk = missing.slice(i, i + IN_CHUNK);
-      const { results } = await db.prepare(`SELECT u.id, u.display_name, u.email, p.products, p.boards, p.referrals
-          FROM users u LEFT JOIN email_preferences p ON p.user_id = u.id WHERE u.id IN (${chunk.map(() => '?').join(', ')})`).bind(...chunk)
-        .all<{ id: string; display_name: string; email: string | null; products: number | null; boards: number | null; referrals: number | null }>();
-      for (const id of chunk) cache.set(id, null);
-      for (const r of results) {
-        cache.set(r.id, {
-          displayName: r.display_name,
-          email: r.email?.trim() || null,
-          groups: r.products === null ? null : { products: r.products === 1, boards: r.boards === 1, referrals: r.referrals === 1 },
-        });
-      }
-    }
-  }
-  return { load, get: (id: string) => cache.get(id) ?? null };
-}
 
 function draftStatements(db: D1Database, d: EmailDraft, r: Recipient, now: string): D1PreparedStatement[] {
   const group = EMAIL_KIND_GROUP[d.kind];
@@ -106,7 +75,7 @@ export async function projectEmailEvents(rawDb: D1Database, origin: string, nowM
   const out: ProjectionResult = { events: events.length, queued: 0, deferred: 0, failed: 0, abandoned: 0, lastSeq: after, budgetExhausted: false };
   if (!events.length) return out;
 
-  const recipients = recipientCache(db);
+  const recipients = recipientCache(db, budget);
   const ctx = {
     db, origin, nowMs,
     displayNames: async (ids: string[]) => {
@@ -126,6 +95,11 @@ export async function projectEmailEvents(rawDb: D1Database, origin: string, nowM
       try {
         drafts = await mapEvent(ctx, e);
       } catch (err) {
+        // Out of budget is not a failure of the event: stop the page, the next run continues here.
+        if (err instanceof QueryBudgetExhausted) {
+          out.budgetExhausted = true;
+          break;
+        }
         const failures = (e.failures ?? 0) + 1;
         out.failed++;
         if (failures < MAX_EVENT_FAILURES) {
@@ -146,7 +120,13 @@ export async function projectEmailEvents(rawDb: D1Database, origin: string, nowM
       out.lastSeq = e.seq;
       continue;
     }
-    await recipients.load(drafts.map(d => d.userId));
+    try {
+      await recipients.load(drafts.map(d => d.userId));
+    } catch (err) {
+      if (!(err instanceof QueryBudgetExhausted)) throw err;
+      out.budgetExhausted = true;
+      break;
+    }
     for (const d of drafts) {
       const r = recipients.get(d.userId);
       if (!r) continue;

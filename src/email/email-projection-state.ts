@@ -72,6 +72,13 @@ export const hasProjectionWorkSql = () =>
   `(EXISTS (SELECT 1 FROM outbox_events WHERE rowid > (SELECT CAST(value AS INTEGER) FROM email_settings WHERE key = 'projection_high'))
     OR EXISTS (SELECT 1 FROM email_event_deferrals WHERE retry_after <= ?1))`;
 
+/** True when an event above projection_high exists (written after the last page was read). */
+export async function hasUnseenEvents(db: D1Database) {
+  const r = await db.prepare(`SELECT EXISTS (SELECT 1 FROM outbox_events WHERE rowid > (SELECT CAST(value AS INTEGER) FROM email_settings WHERE key = 'projection_high')) AS n`)
+    .first<{ n: number }>();
+  return r?.n === 1;
+}
+
 /** Take the projection lease. Returns its expiry when taken, null while another run holds it. */
 export async function acquireProjectionLease(db: D1Database, nowMs: number): Promise<string | null> {
   const until = iso(nowMs + PROJECTION_LEASE_MS);

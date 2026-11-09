@@ -1,6 +1,7 @@
 import { projectEmailEvents } from '../src/email/email-projector';
 import type { EmailTransport, OutgoingEmail } from '../src/email/email-transport';
 import { newId } from '../src/lib/ids';
+import { iso } from '../src/lib/time';
 import { db } from './helpers';
 
 export const ORIGIN = 'https://bip.test';
@@ -58,3 +59,17 @@ export function fakeTransport(opts: { fail?: boolean | Error; delayMs?: number }
   };
   return { sent, transport };
 }
+
+/** Insert an email_outbox row due at `dueMs` (bypassing the projector). */
+export async function queue(userId: string, kind: 'welcome' | 'product_decision', dueMs: number, extra: Partial<EmailRow> = {}) {
+  const id = newId('eml');
+  const data = kind === 'welcome'
+    ? { kind, displayName: 'Sam' }
+    : { kind, displayName: 'Sam', productName: 'Thing', productUrl: `${ORIGIN}/p/thing`, outcome: 'published', reason: '' };
+  await db().prepare(`INSERT INTO email_outbox (id, user_id, kind, group_name, dedupe_key, to_address, data_json, status, attempts, next_attempt_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, userId, kind, kind === 'welcome' ? null : 'products', `test:${id}`, extra.to_address === undefined ? 'sam@example.test' : extra.to_address,
+      JSON.stringify(data), extra.status ?? 'pending', extra.attempts ?? 0, iso(dueMs), iso(dueMs), extra.updated_at ?? iso(dueMs)).run();
+  return id;
+}
+export const row = async (id: string) => (await db().prepare('SELECT * FROM email_outbox WHERE id = ?').bind(id).first<EmailRow>())!;

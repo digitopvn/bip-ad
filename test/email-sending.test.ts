@@ -8,25 +8,13 @@ import type { Env } from '../src/env';
 import { newId } from '../src/lib/ids';
 import { iso } from '../src/lib/time';
 import { db, E, makeUser } from './helpers';
-import { type EmailRow, fakeTransport, ORIGIN } from './email-helpers';
+import { fakeTransport, ORIGIN, queue, row } from './email-helpers';
 
 const FROM = { name: 'bip.ad', email: 'noreply@bip.ad' };
 // Each test sends at its own instant far from the others so rows of earlier tests are never due again.
 let clock = Date.parse('2032-01-01T00:00:00Z');
 const nextClock = () => (clock += 30 * 86400_000);
 
-async function queue(userId: string, kind: 'welcome' | 'product_decision', dueMs: number, extra: Partial<EmailRow> = {}) {
-  const id = newId('eml');
-  const data = kind === 'welcome'
-    ? { kind, displayName: 'Sam' }
-    : { kind, displayName: 'Sam', productName: 'Thing', productUrl: `${ORIGIN}/p/thing`, outcome: 'published', reason: '' };
-  await db().prepare(`INSERT INTO email_outbox (id, user_id, kind, group_name, dedupe_key, to_address, data_json, status, attempts, next_attempt_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, userId, kind, kind === 'welcome' ? null : 'products', `test:${id}`, extra.to_address === undefined ? 'sam@example.test' : extra.to_address,
-      JSON.stringify(data), extra.status ?? 'pending', extra.attempts ?? 0, iso(dueMs), iso(dueMs), extra.updated_at ?? iso(dueMs)).run();
-  return id;
-}
-const row = async (id: string) => (await db().prepare('SELECT * FROM email_outbox WHERE id = ?').bind(id).first<EmailRow>())!;
 const send = (transport: ReturnType<typeof fakeTransport>['transport'], nowMs: number, origin = ORIGIN) => sendDueEmails(db(), transport, { origin, from: FROM, nowMs });
 
 describe('email sender', () => {
