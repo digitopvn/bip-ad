@@ -30,6 +30,9 @@ import { boardPage } from './views/board';
 import { checkoutPage, paypalReturnPage } from './views/checkout';
 import { errorPage } from './views/error';
 import { homePage } from './views/home';
+import { privacyPage } from './views/legal-privacy-page';
+import { refundsPage } from './views/legal-refunds-page';
+import { termsPage } from './views/legal-terms-page';
 import { escapeHtml } from './views/html';
 import { loginPage, safeNext } from './views/login';
 import { productPage } from './views/product';
@@ -132,6 +135,11 @@ app.get('/s/:board/:date', async c => {
   if (c.req.param('date').endsWith('.json')) return c.json(v);
   return page(c, `${board} snapshot ${date} — bip.ad`, ctx => snapshotPage(ctx, v));
 });
+
+// Legal policies, linked from the footer and the checkout page.
+app.get('/terms', c => page(c, 'Terms of Service — bip.ad', termsPage, 200, 'The rules for listing products, all-pay bidding and referrals on bip.ad.'));
+app.get('/privacy', c => page(c, 'Privacy Policy — bip.ad', privacyPage, 200, 'What bip.ad collects, why, and who processes it.'));
+app.get('/refunds', c => page(c, 'Refund Policy — bip.ad', refundsPage, 200, 'When bip.ad refunds a bid and what a refund or chargeback changes.'));
 
 app.get('/r/:code', async c => {
   const code = c.req.param('code').toLowerCase();
