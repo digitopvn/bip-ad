@@ -28,8 +28,10 @@ export interface SenderOptions {
   nowMs?: number;
   limit?: number;
   budget?: QueryBudget;
-  /** Wall-clock instant (Date.now()) after which the platform may cancel the run, e.g. waitUntil after a response. */
+  /** Wall-clock instant after which the platform may cancel the run, e.g. waitUntil after a response. */
   deadlineMs?: number;
+  /** Wall clock for the deadline (injectable for tests); defaults to Date.now. */
+  clock?: () => number;
 }
 
 interface ClaimedRow {
@@ -123,20 +125,31 @@ export async function sendDueEmails(rawDb: D1Database, transport: EmailTransport
   const db = meteredDb(rawDb, budget);
   const out: SendResult = { claimed: 0, sent: 0, skipped: 0, retried: 0, failed: 0, released: 0 };
   const limit = Math.min(o.limit ?? SEND_BATCH_SIZE, budget.remaining - SEND_QUERY_OVERHEAD);
-  // A run cancelled between send and the outcome write would send the email again later.
-  const timeLeft = () => o.deadlineMs === undefined || Date.now() <= o.deadlineMs - SEND_DEADLINE_MARGIN_MS;
+  // A run cancelled between send and the outcome write would send the email again later; the margin is a buffer, not a guarantee.
+  const clock = o.clock ?? Date.now;
+  const timeLeft = () => o.deadlineMs === undefined || clock() <= o.deadlineMs - SEND_DEADLINE_MARGIN_MS;
   if (limit <= 0 || !timeLeft()) return out;
   const nowMs = o.nowMs ?? Date.now();
   const now = iso(nowMs);
   const rows = await claim(db, now, iso(nowMs - SEND_LEASE_MS), limit);
   out.claimed = rows.length;
   if (!rows.length) return out;
-  const prefs = await preferencesOf(db, rows.map(r => r.user_id), now);
+  // Hand a row back as it was (still due), so the next run sends it without waiting for the lease.
+  const release = async (row: ClaimedRow) => {
+    await finish(db, row, `status = 'pending', attempts = attempts - 1, updated_at = ?`, now).catch(e => console.error(`email ${row.id}: releasing the claim failed`, e));
+    out.released++;
+  };
+  let prefs: Map<string, PreferencesRow>;
+  try {
+    prefs = await preferencesOf(db, rows.map(r => r.user_id), now);
+  } catch (e) {
+    console.error('email: loading preferences failed; handing the claimed rows back', e);
+    for (const row of rows) await release(row);
+    return out;
+  }
   for (const row of rows) {
     if (!timeLeft()) {
-      // Hand the row back as it was (still due), so the next run sends it without waiting for the lease.
-      await finish(db, row, `status = 'pending', attempts = attempts - 1, updated_at = ?`, now).catch(e => console.error(`email ${row.id}: releasing the claim failed`, e));
-      out.released++;
+      await release(row);
       continue;
     }
     let messageId: string;

@@ -1,6 +1,7 @@
-// Counts D1 queries so a background email run stays inside the per-invocation query limit
-// (Workers Paid: 1000 per invocation, a db.batch() counts as one). The run shares that limit with
-// the request or cron job that scheduled it, so it gets its own smaller cap and stops early.
+// Counts D1 queries so an email run stays inside the per-invocation query limit (Workers Paid:
+// 1000 per invocation, a db.batch() counts as one). A waitUntil run shares that limit with the
+// request that scheduled it, so it gets a small cap; the email cron owns its invocation and gets a
+// larger one with headroom. Either way the run stops early instead of hitting the limit.
 
 export class QueryBudget {
   used = 0;

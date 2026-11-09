@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import wranglerConfig from '../wrangler.jsonc?raw';
 import { outboxStatement } from '../src/domain/ledger';
 import { QueryBudget, QueryBudgetExhausted, meteredDb } from '../src/email/d1-query-meter';
@@ -40,7 +40,7 @@ describe('request run deadline', () => {
     const u = await makeUser('Too Late');
     const ids = [await queue(u, 'welcome', t), await queue(u, 'welcome', t)];
     const fake = fakeTransport();
-    const r = await processEmails(E, t, fake.transport, REQUEST_RUN, Date.now() - 1);
+    const r = await processEmails(E, t, fake.transport, REQUEST_RUN, { deadlineMs: Date.now() - 1 });
     expect(r).toMatchObject({ sending: null, projection: null });
     expect(await sendDueEmails(db(), fake.transport, { origin: ORIGIN, from: FROM, nowMs: t, deadlineMs: Date.now() + 4_000 })).toMatchObject({ claimed: 0 });
     expect(fake.sent).toEqual([]);
@@ -52,12 +52,53 @@ describe('request run deadline', () => {
     const t = Date.parse('2034-02-01T00:00:00Z');
     const u = await makeUser('Slow Provider');
     const ids = [await queue(u, 'welcome', t), await queue(u, 'welcome', t), await queue(u, 'welcome', t)];
-    // The first send takes longer than the time left above the 5 s margin.
-    const fake = fakeTransport({ delayMs: 1_200 });
-    const r = await sendDueEmails(db(), fake.transport, { origin: ORIGIN, from: FROM, nowMs: t, deadlineMs: Date.now() + 6_000 });
+    // A fake wall clock: each send takes 2 s, the deadline leaves 1 s above the 5 s margin.
+    let clock = 0;
+    const fake = fakeTransport();
+    const slow = { send: async (m: Parameters<typeof fake.transport.send>[0]) => ((clock += 2_000), fake.transport.send(m)) };
+    const r = await sendDueEmails(db(), slow, { origin: ORIGIN, from: FROM, nowMs: t, deadlineMs: 6_000, clock: () => clock });
     expect(r).toMatchObject({ claimed: 3, sent: 1, released: 2 });
     const rows = await Promise.all(ids.map(row));
     expect(rows.filter(x => x.status === 'pending' && x.attempts === 0 && x.next_attempt_at === iso(t))).toHaveLength(2);
+    for (const id of ids) await db().prepare('DELETE FROM email_outbox WHERE id = ?').bind(id).run();
+  });
+
+  it('hands the claimed rows back when loading preferences fails after the claim', async () => {
+    const t = Date.parse('2034-03-01T00:00:00Z');
+    const u = await makeUser('No Prefs Table');
+    const ids = [await queue(u, 'welcome', t), await queue(u, 'welcome', t)];
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await db().prepare('ALTER TABLE email_preferences RENAME TO email_preferences_away').run();
+    try {
+      expect(await sendDueEmails(db(), fakeTransport().transport, { origin: ORIGIN, from: FROM, nowMs: t })).toMatchObject({ claimed: 2, sent: 0, released: 2 });
+    } finally {
+      await db().prepare('ALTER TABLE email_preferences_away RENAME TO email_preferences').run();
+      errors.mockRestore();
+    }
+    for (const id of ids) expect(await row(id)).toMatchObject({ status: 'pending', attempts: 0 });
+    for (const id of ids) await db().prepare('DELETE FROM email_outbox WHERE id = ?').bind(id).run();
+  });
+
+  it('a cron run claims at the current time of each round and stops at its 8-minute deadline', async () => {
+    const t = Date.parse('2034-04-01T00:00:00Z');
+    const u = await makeUser('Long Cron');
+    const ids = await Promise.all(Array.from({ length: CRON_RUN.sendLimit + 1 }, () => queue(u, 'welcome', t)));
+    // A fake wall clock: each send takes 10 s, so the second round starts more than 250 s into the run.
+    let clock = 0;
+    const fake = fakeTransport();
+    const slow = { send: async (m: Parameters<typeof fake.transport.send>[0]) => ((clock += 10_000), fake.transport.send(m)) };
+    const r = await processEmails(E, t, slow, CRON_RUN, { clock: () => clock });
+    expect(r.sending).toMatchObject({ claimed: ids.length, sent: ids.length, released: 0 });
+    // The last row was claimed in round two, stamped with nowMs moved on by the elapsed wall time.
+    const last = (await Promise.all(ids.map(row))).sort((x, y) => x.updated_at.localeCompare(y.updated_at)).at(-1)!;
+    expect(Date.parse(last.updated_at)).toBe(t + CRON_RUN.sendLimit * 10_000);
+    // Past the deadline nothing new starts: a fresh due row stays pending.
+    const late = await queue(u, 'welcome', t);
+    let jumps = 0;
+    const r2 = await processEmails(E, t, slow, CRON_RUN, { clock: () => (jumps++ === 0 ? 0 : CRON_RUN.windowMs) });
+    expect(r2.sending).toMatchObject({ claimed: 0 });
+    expect(await row(late)).toMatchObject({ status: 'pending', attempts: 0 });
+    for (const id of [...ids, late]) await db().prepare('DELETE FROM email_outbox WHERE id = ?').bind(id).run();
   });
 });
 

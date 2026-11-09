@@ -252,7 +252,7 @@ export async function moderateAfterChange(env: Env, cfg: Config, productId: stri
   // counts from now, when the waitUntil work starts, so after a slow AI stage this run only
   // projects (or does nothing) and the email cron sends.
   const emailDeadline = requestRunDeadline();
-  waitUntil(runFullSafely(db, cfg, deps, s).then(() => processEmails(env, Date.now(), undefined, REQUEST_RUN, emailDeadline)));
+  waitUntil(runFullSafely(db, cfg, deps, s).then(() => processEmails(env, Date.now(), undefined, REQUEST_RUN, { deadlineMs: emailDeadline })));
   return { state: 'scoring', reasons: fast.reasons };
 }
 
