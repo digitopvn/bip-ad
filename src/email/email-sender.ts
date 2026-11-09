@@ -129,15 +129,16 @@ export async function sendDueEmails(rawDb: D1Database, transport: EmailTransport
   const clock = o.clock ?? Date.now;
   const timeLeft = () => o.deadlineMs === undefined || clock() <= o.deadlineMs - SEND_DEADLINE_MARGIN_MS;
   if (limit <= 0 || !timeLeft()) return out;
-  const nowMs = o.nowMs ?? Date.now();
+  const nowMs = o.nowMs ?? clock();
   const now = iso(nowMs);
   const rows = await claim(db, now, iso(nowMs - SEND_LEASE_MS), limit);
   out.claimed = rows.length;
   if (!rows.length) return out;
   // Hand a row back as it was (still due), so the next run sends it without waiting for the lease.
   const release = async (row: ClaimedRow) => {
-    await finish(db, row, `status = 'pending', attempts = attempts - 1, updated_at = ?`, now).catch(e => console.error(`email ${row.id}: releasing the claim failed`, e));
-    out.released++;
+    // A failed release is recovered by the lease expiring; only count releases that were written.
+    await finish(db, row, `status = 'pending', attempts = attempts - 1, updated_at = ?`, now)
+      .then(() => { out.released++; }, e => console.error(`email ${row.id}: releasing the claim failed`, e));
   };
   let prefs: Map<string, PreferencesRow>;
   try {
