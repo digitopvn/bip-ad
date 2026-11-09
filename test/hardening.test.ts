@@ -228,7 +228,7 @@ describe('moderation of published products', () => {
   it('edits and new page versions wait for the operator when auto-approval is off; approval applies them', async () => {
     const u = await makeUser();
     const p = await makeProduct(u, 'Moderated Edit');
-    const strict = { ...cfg(), autoApprove: false };
+    const strict = { ...cfg(), moderationMode: 'manual' as const, autoApprove: false };
     const edited = await updateProduct(db(), strict, u, p, { website_url: 'https://elsewhere.example.com' });
     expect(edited.website_url).toBe('https://example.com');
     expect(JSON.parse(edited.pending_edit_json!).website_url).toBe('https://elsewhere.example.com');
@@ -373,7 +373,7 @@ describe('round-three regressions', () => {
   it('approving a submission pins the reviewed version, including page swaps', async () => {
     const u = await makeUser();
     const { createProduct, submitProduct, pendingModeration } = await import('../src/domain/products');
-    const strict = { ...cfg(), autoApprove: false };
+    const strict = { ...cfg(), moderationMode: 'manual' as const, autoApprove: false };
     const pr = await createProduct(db(), u, { name: 'Pinned Submission', tagline: 'Pinned', website_url: 'https://pinned.example.com' }, newId('k'));
     await setBlocks(db(), u, pr.id, [{ type: 'hero', headline: 'Reviewed page' }]);
     await submitProduct(db(), strict, u, pr.id);
@@ -424,7 +424,7 @@ describe('round-four regressions', () => {
   it('publishing another page after review invalidates the reviewed version; pending shows the page approval publishes', async () => {
     const u = await makeUser();
     const { createProduct, submitProduct, pendingModeration } = await import('../src/domain/products');
-    const strict = { ...cfg(), autoApprove: false };
+    const strict = { ...cfg(), moderationMode: 'manual' as const, autoApprove: false };
     const pr = await createProduct(db(), u, { name: 'Page Pin', tagline: 'Pin', website_url: 'https://pin.example.com' }, newId('k'));
     await setBlocks(db(), u, pr.id, [{ type: 'hero', headline: 'Old page' }]);
     await publishPage(db(), strict, u, pr.id, 1);

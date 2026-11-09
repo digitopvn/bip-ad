@@ -14,13 +14,17 @@ import type { Env } from '../env';
 import { nextCutoffAfter, iso } from '../lib/time';
 import { jsonTool } from './common';
 import { createProviderCheckout } from '../payments/checkout';
+import { moderateAfterChange } from '../moderation/ai-moderation-pipeline';
 
 const board = z.enum(['daily', 'weekly', 'monthly']);
 const idem = z.string().min(8).max(100).describe('Client-generated idempotency key; reuse it when retrying the same request');
 
-export function userMcpServer(env: Env, userId: string) {
+/** `waitUntil` keeps the async moderation stage alive after the tool call returns. */
+export function userMcpServer(env: Env, userId: string, waitUntil: (p: Promise<unknown>) => void = p => void p.catch(() => {})) {
   const db = env.DB;
   const cfg = config(env);
+  /** Every submission and edit is re-scored; the answer tells the agent whether it is scoring or waiting for the operator. */
+  const moderate = (productId: string) => moderateAfterChange(env, cfg, productId, waitUntil);
   const server = new McpServer({ name: 'bip-ad', version: '0.1.0' }, {
     instructions: 'BIP.AD lists products on three pay-to-win boards (Daily/Weekly/Monthly) that lock at 03:12 ICT. Create a product, set page blocks, submit, then quote and check out boosts. Checkouts are paid by the human on the returned URL. All bids are all-pay: no refunds for being outbid, no guaranteed results.',
   });
@@ -38,10 +42,16 @@ export function userMcpServer(env: Env, userId: string) {
 
   jsonTool(server, 'products.update', 'Edit a product you own. Pass resource_version (the product version you read) for optimistic concurrency. Edits to a published product go live after moderation (see pending_review).', {
     product_id: z.string(), name: z.string().max(80).optional(), tagline: z.string().max(160).optional(), website_url: z.string().url().optional(), image_url: z.string().url().nullable().optional(), resource_version: z.number().int().optional(),
-  }, false, async a => productView(await updateProduct(db, cfg, userId, a.product_id, { name: a.name, tagline: a.tagline, website_url: a.website_url, image_url: a.image_url ?? (a.image_url === null ? '' : undefined) }, a.resource_version)));
+  }, false, async a => {
+    const p = await updateProduct(db, cfg, userId, a.product_id, { name: a.name, tagline: a.tagline, website_url: a.website_url, image_url: a.image_url ?? (a.image_url === null ? '' : undefined) }, a.resource_version);
+    return { ...productView(p), moderation: await moderate(p.id) };
+  });
 
-  jsonTool(server, 'products.submit', 'Submit a product for moderation and publication. Requires page blocks.', { product_id: z.string() }, false,
-    async a => productView(await submitProduct(db, cfg, userId, a.product_id)));
+  jsonTool(server, 'products.submit', 'Submit a product for moderation and publication. Requires page blocks. Every submission and edit is scored by automated moderation; low-risk products are published automatically, others wait for an operator.', { product_id: z.string() }, false,
+    async a => {
+      const p = await submitProduct(db, cfg, userId, a.product_id);
+      return { ...productView(p), moderation: await moderate(p.id) };
+    });
 
   jsonTool(server, 'products.get', 'Get one of your products.', { product_id: z.string() }, true, async a => productView(await ownedProduct(db, userId, a.product_id)));
 
@@ -53,7 +63,7 @@ export function userMcpServer(env: Env, userId: string) {
     const r = await setBlocks(db, userId, a.product_id, a.blocks);
     if (!r.ok) return { ok: false, issues: r.issues };
     const p = (await getProduct(db, a.product_id))!;
-    return { ok: true, page_version_id: r.pageVersionId, version: r.version, preview_url: `${cfg.origin}/p/${p.slug}?preview=${r.version}` };
+    return { ok: true, page_version_id: r.pageVersionId, version: r.version, preview_url: `${cfg.origin}/p/${p.slug}?preview=${r.version}`, moderation: await moderate(p.id) };
   });
 
   jsonTool(server, 'pages.preview', 'Preview URL and validation issues for the latest (or given) page version.', { product_id: z.string(), version: z.number().int().optional() }, true, async a => {
@@ -68,7 +78,7 @@ export function userMcpServer(env: Env, userId: string) {
     const r = await publishPage(db, cfg, userId, a.product_id, a.version);
     if (!r.ok) return { ok: false, issues: r.issues };
     const p = (await getProduct(db, a.product_id))!;
-    return { ok: true, page_version_id: r.pageVersionId, version: r.version, product_status: r.productStatus, pending_review: r.pendingReview, reasons: r.reasons, public_url: `${cfg.origin}/p/${p.slug}` };
+    return { ok: true, page_version_id: r.pageVersionId, version: r.version, product_status: r.productStatus, pending_review: r.pendingReview, reasons: r.reasons, public_url: `${cfg.origin}/p/${p.slug}`, moderation: await moderate(p.id) };
   });
 
   jsonTool(server, 'boards.get', 'Live leaderboard for a board with the next 03:12 ICT cutoff. Ranking: active bid DESC, then owner successful referrals, valid clicks, valid views.', { board, limit: z.number().int().min(1).max(100).optional() }, true, async a => {

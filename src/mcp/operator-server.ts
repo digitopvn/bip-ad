@@ -12,6 +12,7 @@ import { failPayout, preparePayoutBatch, recordManualTransfer } from '../domain/
 import type { Env } from '../env';
 import { iso } from '../lib/time';
 import { jsonTool } from './common';
+import { runModerationJob, scoresFor } from '../moderation/ai-moderation-pipeline';
 
 const ACTOR = 'operator:grok';
 
@@ -45,8 +46,16 @@ export function operatorMcpServer(env: Env) {
     };
   });
 
-  jsonTool(server, 'products.pending', 'Products waiting for moderation: submissions, and pending field edits or page versions of published products (with their version).', {}, true,
-    async () => ({ products: await pendingModeration(db) }));
+  jsonTool(server, 'products.pending', 'Products waiting for moderation: submissions, and pending field edits or page versions of published products (with their version), each with the AI moderation scores of that exact version (ai_moderation).', {}, true,
+    async () => {
+      const rows = await pendingModeration(db);
+      const products = [];
+      for (const r of rows) products.push({ ...r, ai_moderation: await scoresFor(db, String(r.id), Number(r.version)) });
+      return { moderation_mode: cfg.moderationMode, products };
+    });
+
+  jsonTool(server, 'moderation.rescore', 'Run AI moderation again for the current version of a product awaiting moderation (both stages, inline). In ai mode a passing verdict publishes it.', { product_id: z.string() }, false,
+    async a => runModerationJob(env, cfg, a.product_id, undefined, true));
 
   jsonTool(server, 'products.moderate', 'Approve, reject or suspend a product, with a reason code (logged). Every approval needs the product_version you reviewed (from products.pending).', {
     product_id: z.string(), decision: z.enum(['approve', 'reject', 'suspend']), reason: z.string().max(200), product_version: z.number().int().optional(),

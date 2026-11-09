@@ -94,7 +94,7 @@ export async function createProduct(db: D1Database, userId: string, input: Produ
 
 /**
  * Edit product fields. Unpublished products change directly. A published product keeps its live
- * fields until the edit passes moderation: auto-approved only when AUTO_APPROVE_PRODUCTS is on and
+ * fields until the edit passes moderation: auto-approved inline only in MODERATION_MODE=screen when
  * the screen passes, otherwise stored as pending_edit_json for the operator.
  */
 export async function updateProduct(db: D1Database, cfg: Config, userId: string, productId: string, patch: Partial<ProductInput>, expectedVersion?: number, nowMs = Date.now()) {
@@ -294,7 +294,7 @@ export async function setBlocks(db: D1Database, userId: string, productId: strin
 /**
  * Publish a page version. Before the product is public the owner may switch versions (the product
  * itself still goes through submission). For a published product the version goes live only when
- * AUTO_APPROVE_PRODUCTS is on and the page screen passes; otherwise it waits for the operator.
+ * MODERATION_MODE=screen and the page screen passes; otherwise it waits for the AI job or the operator.
  */
 export async function publishPage(db: D1Database, cfg: Config, userId: string, productId: string, version: number | undefined, nowMs = Date.now()) {
   const p = await ownedProduct(db, userId, productId);

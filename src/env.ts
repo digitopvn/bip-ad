@@ -19,7 +19,19 @@ export interface Env {
   REFERRAL_ATTRIBUTION_DAYS: string;
   MIN_PAYOUT_USD_CENTS: string;
   MIN_PAYOUT_VND: string;
-  AUTO_APPROVE_PRODUCTS: string;
+  /** screen: regex screen auto-approves inline (local dev/tests). manual: AI scores, operator approves. ai: AI auto-approves low-risk changes. */
+  MODERATION_MODE?: string;
+  /** Decision (System One) model provider: cloudflare (Clef on Workers AI), typesafe (Jev) or openrouter (Jev). */
+  MODERATION_DECISION_PROVIDER?: string;
+  /** Fast decision model for the inline stage, e.g. clef-flash. */
+  MODERATION_DECISION_MODEL_FAST?: string;
+  /** Decision model for the full (async) stage, e.g. clef. */
+  MODERATION_DECISION_MODEL?: string;
+  /** OpenAI-compatible chat provider for the evidence LLM: cloudflare (Workers AI) or openrouter. */
+  MODERATION_LLM_PROVIDER?: string;
+  MODERATION_LLM_MODEL?: string;
+  /** Highest combined risk (0-1) that the ai mode still auto-approves. */
+  MODERATION_APPROVE_MAX_RISK?: string;
   PAYPAL_API_BASE: string;
   SEPAY_API_BASE: string;
   SEPAY_CHECKOUT_URL: string;
@@ -36,6 +48,11 @@ export interface Env {
   SEPAY_MERCHANT_ID?: string;
   SEPAY_SECRET_KEY?: string;
   SEPAY_IPN_SECRET?: string;
+  /** Workers AI is called over REST with its own account, separate from the account that hosts this worker. */
+  AI_CLOUDFLARE_ACCOUNT_ID?: string;
+  AI_CLOUDFLARE_API_TOKEN?: string;
+  TYPESAFE_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
 }
 
 /** Props stored in the MCP access token grant. */

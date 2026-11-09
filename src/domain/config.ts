@@ -20,6 +20,8 @@ export const TOP_N = 10;
 /** Largest single bid accepted while PAYMENT_MODE=simulated (USD 1,000), so test bids stay plausible. */
 export const SIMULATED_MAX_RANK_UNITS = 100_000;
 
+export type ModerationMode = 'screen' | 'manual' | 'ai';
+
 export type PaymentMode = 'simulated' | 'sandbox' | 'live';
 export type Currency = 'USD' | 'VND';
 
@@ -32,6 +34,8 @@ export interface Config {
   referralHoldMs: number;
   referralAttributionMs: number;
   minPayout: Record<Currency, number>;
+  moderationMode: ModerationMode;
+  /** True only in the screen mode: the regex screen alone publishes inline. Other modes defer to the AI job or the operator. */
   autoApprove: boolean;
   origin: string;
 }
@@ -46,6 +50,10 @@ export function config(env: Env): Config {
   // Fail closed: an unset mode is simulated, but a typo (e.g. "Live") is a configuration error.
   const raw = (env.PAYMENT_MODE ?? '').trim();
   if (raw && raw !== 'simulated' && raw !== 'sandbox' && raw !== 'live') throw new Error(`Invalid PAYMENT_MODE "${raw}": use simulated, sandbox or live`);
+  // Fail closed: an unset moderation mode means the operator approves everything.
+  const rawModeration = (env.MODERATION_MODE ?? '').trim();
+  if (rawModeration && rawModeration !== 'screen' && rawModeration !== 'manual' && rawModeration !== 'ai') throw new Error(`Invalid MODERATION_MODE "${rawModeration}": use screen, manual or ai`);
+  const moderationMode: ModerationMode = (rawModeration || 'manual') as ModerationMode;
   let mode: PaymentMode = raw === 'live' || raw === 'sandbox' ? raw : 'simulated';
   if (mode === 'live' && env.LIVE_PAYMENTS !== 'true') mode = 'sandbox';
   return {
@@ -57,7 +65,8 @@ export function config(env: Env): Config {
     referralHoldMs: int(env.REFERRAL_HOLD_DAYS, 30) * DAY_MS,
     referralAttributionMs: int(env.REFERRAL_ATTRIBUTION_DAYS, 30) * DAY_MS,
     minPayout: { USD: int(env.MIN_PAYOUT_USD_CENTS, 1000), VND: int(env.MIN_PAYOUT_VND, 250000) },
-    autoApprove: env.AUTO_APPROVE_PRODUCTS === 'true',
+    moderationMode,
+    autoApprove: moderationMode === 'screen',
     origin: (env.PUBLIC_ORIGIN || 'http://localhost:8787').replace(/\/$/, ''),
   };
 }
