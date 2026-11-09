@@ -1,6 +1,7 @@
 import OAuthProvider from '@cloudflare/workers-oauth-provider';
 import { app } from './app';
 import { expireIntents } from './domain/bidding';
+import { CRON_RUN, processEmails, scheduleEmailProcessing } from './email/process-emails';
 import { config } from './domain/config';
 import { runDueLocks } from './domain/snapshot';
 import { vestCommissions } from './domain/wallet';
@@ -16,7 +17,10 @@ const mcpApi = {
     if (!userId) return new Response('unauthorized', { status: 401 });
     const user = await env.DB.prepare('SELECT status FROM users WHERE id = ?').bind(userId).first<{ status: string }>();
     if (!user || user.status !== 'active') return new Response('account suspended', { status: 403 });
-    return serveMcp(userMcpServer(env, userId, p => ctx.waitUntil(p)), request);
+    const res = await serveMcp(userMcpServer(env, userId, p => ctx.waitUntil(p)), request);
+    // Tool calls (products, bids, payouts) may have queued domain events: email them promptly.
+    if (request.method === 'POST') scheduleEmailProcessing(env, p => ctx.waitUntil(p));
+    return res;
   },
 };
 
@@ -73,9 +77,24 @@ export async function scheduledJob(env: Env, nowMs = Date.now()) {
   return locks;
 }
 
+/** Cron of the email run (wrangler.jsonc triggers). Its own invocation, so it never shares the D1 query limit with the lock. */
+export const EMAIL_CRON = '*/15 * * * *';
+
+/** Route a cron invocation: the email cron only processes email; the others run the lock and housekeeping. */
+export async function runScheduled(cron: string, env: Env) {
+  if (cron === EMAIL_CRON) {
+    const r = await processEmails(env, Date.now(), undefined, CRON_RUN);
+    console.log('email run', JSON.stringify({ projection: r.projection, sending: r.sending, queries: r.queriesUsed }));
+    return r;
+  }
+  const locks = await scheduledJob(env);
+  console.log('lock run', JSON.stringify(locks.map(x => ({ cutoff: x.cutoffAt, skipped: x.skipped }))));
+  return locks;
+}
+
 export default {
   fetch: (req: Request, env: Env, ctx: ExecutionContext) => oauthProvider(env).fetch(req, env, ctx),
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(scheduledJob(env).then(r => console.log('lock run', JSON.stringify(r.map(x => ({ cutoff: x.cutoffAt, skipped: x.skipped }))))));
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runScheduled(controller.cron, env));
   },
 } satisfies ExportedHandler<Env>;

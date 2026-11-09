@@ -165,6 +165,10 @@ describe('AI moderation pipeline', () => {
     const s = await scoresFor(db(), id, scoredVersion);
     expect(s.job?.status).toBe('done');
     expect(s.scores.map(x => x.stage).sort()).toEqual(['fast', 'full']);
+    // Email processing is chained after the async stage, so the decision email is already queued.
+    const { owner } = await db().prepare('SELECT owner_id AS owner FROM products WHERE id = ?').bind(id).first<{ owner: string }>() ?? { owner: '' };
+    const mail = await db().prepare(`SELECT data_json FROM email_outbox WHERE user_id = ? AND kind = 'product_decision'`).bind(owner).all<{ data_json: string }>();
+    expect(mail.results.map(r => JSON.parse(r.data_json).outcome)).toEqual(['published']);
   });
 
   it('never sends injected content to the LLM and leaves it for the operator', async () => {

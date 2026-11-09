@@ -138,6 +138,20 @@ export function operatorMcpServer(env: Env) {
     return { decisions: results };
   });
 
+  jsonTool(server, 'emails.list', 'Recent transactional emails (newest first), optionally filtered by status, user or kind. No message bodies.', {
+    status: z.enum(['pending', 'sending', 'sent', 'skipped', 'failed']).optional(), user_id: z.string().max(64).optional(), kind: z.string().max(40).optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+  }, true, async a => {
+    const where: string[] = [];
+    const binds: unknown[] = [];
+    if (a.status) { where.push('status = ?'); binds.push(a.status); }
+    if (a.user_id) { where.push('user_id = ?'); binds.push(a.user_id); }
+    if (a.kind) { where.push('kind = ?'); binds.push(a.kind); }
+    const { results } = await db.prepare(`SELECT id, user_id, kind, to_address, status, skip_reason, attempts, last_error, provider_message_id, created_at, sent_at
+        FROM email_outbox ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC, id DESC LIMIT ?`).bind(...binds, a.limit ?? 50).all();
+    return { emails: results };
+  });
+
   return server;
 }
 
