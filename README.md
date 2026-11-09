@@ -25,7 +25,12 @@ Add the MCP server `https://<your-host>/mcp` to Claude, ChatGPT or any MCP clien
 | `payouts.request` / `payouts.status` | Request a manual payout of available commission. |
 | `analytics.product` | Valid views, clicks and standings for a product. |
 
-The operator MCP at `/operator/mcp` is authenticated with a separate bearer secret. It covers moderation (`products.pending` with AI scores, `products.moderate`, `moderation.rescore`), `boards.freeze`, `locks.run`, cohorts, payment reviews (`payments.reviews`, `payments.resolve_review`), payout batches, recording manual transfers, `finance.reconcile`, and the mock media and ads tools.
+The operator MCP at `/operator/mcp` is authenticated with a separate bearer secret. It covers moderation (`products.pending` with AI scores, `products.moderate`, `moderation.rescore`), `emails.list`, `boards.freeze`, `locks.run`, cohorts, payment reviews (`payments.reviews`, `payments.resolve_review`), payout batches, recording manual transfers, `finance.reconcile`, and the mock media and ads tools.
+
+## Email
+Users get English transactional email through Cloudflare Email Service ([ADR-0009](docs/ADR/0009-transactional-email.md)): a welcome, product decisions, bid receipts and reversals, the nightly 03:12 lock results, available commissions and paid payouts. The emails are projected from the domain events in `outbox_events` into `email_outbox`. They are sent right after the change and retried by the hourly cron. Users switch the Products, Boards and Referrals groups off in `/account` or with the one-click unsubscribe link. Receipts, reversals, payouts and the welcome are always sent. The operator inspects delivery with `emails.list` on `/operator/mcp`.
+
+Each environment needs the `EMAIL` `send_email` binding and `EMAIL_FROM` (both in `wrangler.jsonc`), and the `bip.ad` zone onboarded under **Compute → Email Service → Email Sending**. Staging sends real email with a `[staging]` subject prefix.
 
 ## Develop
 ```bash
@@ -73,6 +78,7 @@ Architecture and money rules are recorded in [`docs/ADR/`](docs/ADR):
 - [ADR-0006](docs/ADR/0006-mcp-auth-and-operator.md): MCP auth and the operator boundary
 - [ADR-0007](docs/ADR/0007-media-and-ads-mocks.md): media and ads mocks
 - [ADR-0008](docs/ADR/0008-ai-moderation.md): AI moderation of submissions and edits
+- [ADR-0009](docs/ADR/0009-transactional-email.md): transactional email through Cloudflare Email Service
 
 ## License
 [MIT](LICENSE)
