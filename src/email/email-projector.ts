@@ -1,21 +1,30 @@
 // Email projector: consumes domain events from outbox_events (written in the same batch as each
 // state change) and queues the emails they cause in email_outbox. Never mutates outbox_events.
 //
-// Progress is tracked two ways:
+// Progress (email-projection-state.ts):
 // - email_event_receipts marks each handled event, so replays and concurrent runs are no-ops;
-// - email_settings.projection_cursor is the outbox_events rowid up to which EVERY event is handled,
-//   so a run only scans newer events. outbox_events rows are never deleted, so rowids are dense and
-//   increase in commit order (D1 serialises writes; a VACUUM cannot renumber a dense rowid range).
-// A deferred or failed event holds the cursor below itself; later events still get receipts, and
-// the NOT EXISTS on receipts skips them when the deferred event is retried.
+// - projection_cursor is the outbox_events rowid up to which EVERY event is handled, so a page
+//   only scans newer events. outbox_events rows are never deleted, so rowids are dense and increase
+//   in commit order (D1 serialises writes; a VACUUM cannot renumber a dense rowid range);
+// - email_event_deferrals holds events to look at again later (a lock waiting for its other
+//   boards, a failed mapping). They hold the cursor below themselves but are skipped until due,
+//   and projection_high records how far the projector has looked, so they are not pending work.
 import { newId } from '../lib/ids';
 import { iso } from '../lib/time';
-import { EMAIL_KIND_GROUP, type EmailGroup } from './email-message-types';
+import { type QueryBudget, meteredDb, unmetered } from './d1-query-meter';
 import { mapEvent } from './email-event-mapping';
+import { EMAIL_KIND_GROUP, type EmailGroup } from './email-message-types';
 import { preferencesInsertStatement } from './email-preferences';
+import {
+  advanceHighStatement, catchUpCursorStatement, DEFER_RETRY_MS, deferralStatement, FAILURE_RETRY_MS, MAX_EVENT_FAILURES, projectionSettings, receiptStatements,
+} from './email-projection-state';
 import type { EmailDraft, OutboxEvent } from './email-projection-types';
 
 export const PROJECTION_PAGE_SIZE = 50;
+/** Queries one event may need (mapping, lock snapshots, recipients) plus the final batch. */
+const EVENT_QUERY_RESERVE = 8;
+/** D1 allows 100 bound parameters per query. */
+const IN_CHUNK = 90;
 
 interface Recipient {
   displayName: string;
@@ -24,42 +33,27 @@ interface Recipient {
   groups: Record<EmailGroup, boolean> | null;
 }
 
-export interface ProjectionSettings {
-  start: string;
-  cursor: number;
-}
-
-export async function projectionSettings(db: D1Database): Promise<ProjectionSettings> {
-  const { results } = await db.prepare(`SELECT key, value FROM email_settings WHERE key IN ('projection_start', 'projection_cursor')`).all<{ key: string; value: string }>();
-  const get = (k: string) => results.find(r => r.key === k)?.value;
-  const start = get('projection_start');
-  const cursor = Number(get('projection_cursor'));
-  if (!start || !Number.isSafeInteger(cursor)) throw new Error('email_settings is missing projection_start or projection_cursor');
-  return { start, cursor };
-}
-
-/** True when events newer than the cursor exist: the projector has work. */
-export function hasUnprojectedEventsSql() {
-  return `EXISTS (SELECT 1 FROM outbox_events WHERE rowid > (SELECT CAST(value AS INTEGER) FROM email_settings WHERE key = 'projection_cursor'))`;
-}
-
-function recipientLoader(db: D1Database) {
-  const cache = new Map<string, Promise<Recipient | null>>();
-  return (userId: string) => {
-    let hit = cache.get(userId);
-    if (!hit) {
-      hit = db.prepare(`SELECT u.display_name, u.email, p.products, p.boards, p.referrals
-          FROM users u LEFT JOIN email_preferences p ON p.user_id = u.id WHERE u.id = ?`).bind(userId)
-        .first<{ display_name: string; email: string | null; products: number | null; boards: number | null; referrals: number | null }>()
-        .then(r => r && {
+/** Users with their preferences, loaded in one query per chunk of ids and cached for the page. */
+function recipientCache(db: D1Database) {
+  const cache = new Map<string, Recipient | null>();
+  async function load(ids: string[]) {
+    const missing = [...new Set(ids)].filter(id => !cache.has(id));
+    for (let i = 0; i < missing.length; i += IN_CHUNK) {
+      const chunk = missing.slice(i, i + IN_CHUNK);
+      const { results } = await db.prepare(`SELECT u.id, u.display_name, u.email, p.products, p.boards, p.referrals
+          FROM users u LEFT JOIN email_preferences p ON p.user_id = u.id WHERE u.id IN (${chunk.map(() => '?').join(', ')})`).bind(...chunk)
+        .all<{ id: string; display_name: string; email: string | null; products: number | null; boards: number | null; referrals: number | null }>();
+      for (const id of chunk) cache.set(id, null);
+      for (const r of results) {
+        cache.set(r.id, {
           displayName: r.display_name,
           email: r.email?.trim() || null,
           groups: r.products === null ? null : { products: r.products === 1, boards: r.boards === 1, referrals: r.referrals === 1 },
         });
-      cache.set(userId, hit);
+      }
     }
-    return hit;
-  };
+  }
+  return { load, get: (id: string) => cache.get(id) ?? null };
 }
 
 function draftStatements(db: D1Database, d: EmailDraft, r: Recipient, now: string): D1PreparedStatement[] {
@@ -79,57 +73,91 @@ export interface ProjectionResult {
   queued: number;
   deferred: number;
   failed: number;
+  /** Events acknowledged without email after MAX_EVENT_FAILURES failed mappings. */
+  abandoned: number;
+  /** Highest rowid looked at; the next page of the same run starts after it. */
+  lastSeq: number;
+  /** The query budget ran out before the page was finished. */
+  budgetExhausted: boolean;
 }
 
-/** Handle one page of unprojected events. Returns what it did; DB errors on the page read or the final batch throw. */
-export async function projectEmailEvents(db: D1Database, origin: string, nowMs = Date.now(), pageSize = PROJECTION_PAGE_SIZE): Promise<ProjectionResult> {
+export interface ProjectionOptions {
+  pageSize?: number;
+  budget?: QueryBudget;
+  /** Start after this rowid: `lastSeq` of the previous page of the same run, which handled or deferred everything up to it. */
+  afterSeq?: number;
+}
+
+type PageEvent = OutboxEvent & { failures: number | null };
+
+/** Handle one page of events. DB errors reading the page or writing its batch throw. */
+export async function projectEmailEvents(rawDb: D1Database, origin: string, nowMs = Date.now(), o: ProjectionOptions = {}): Promise<ProjectionResult> {
+  const budget = o.budget ?? unmetered();
+  const db = meteredDb(rawDb, budget);
+  const now = iso(nowMs);
   const settings = await projectionSettings(db);
-  const { results: events } = await db.prepare(`SELECT e.rowid AS seq, e.id, e.event_type, e.aggregate_id, e.payload_json, e.created_at
-      FROM outbox_events e
+  const after = Math.max(settings.cursor, o.afterSeq ?? 0);
+  // Deferred events are skipped until due, so a page is never filled by events that cannot progress.
+  const { results: events } = await db.prepare(`SELECT e.rowid AS seq, e.id, e.event_type, e.aggregate_id, e.payload_json, e.created_at, d.failures
+      FROM outbox_events e LEFT JOIN email_event_deferrals d ON d.event_id = e.id
       WHERE e.rowid > ? AND NOT EXISTS (SELECT 1 FROM email_event_receipts r WHERE r.event_id = e.id)
-      ORDER BY e.rowid LIMIT ?`).bind(settings.cursor, pageSize).all<OutboxEvent>();
-  const out: ProjectionResult = { events: events.length, queued: 0, deferred: 0, failed: 0 };
+        AND (d.event_id IS NULL OR d.retry_after <= ?)
+      ORDER BY e.rowid LIMIT ?`).bind(after, now, o.pageSize ?? PROJECTION_PAGE_SIZE).all<PageEvent>();
+  const out: ProjectionResult = { events: events.length, queued: 0, deferred: 0, failed: 0, abandoned: 0, lastSeq: after, budgetExhausted: false };
   if (!events.length) return out;
 
-  const now = iso(nowMs);
-  const recipient = recipientLoader(db);
-  const ctx = { db, origin, nowMs, displayName: async (id: string) => (await recipient(id))?.displayName ?? null };
+  const recipients = recipientCache(db);
+  const ctx = {
+    db, origin, nowMs,
+    displayNames: async (ids: string[]) => {
+      await recipients.load(ids);
+      return new Map(ids.map(id => [id, recipients.get(id)?.displayName ?? null]));
+    },
+  };
   const statements: D1PreparedStatement[] = [];
-  let cursor = settings.cursor;
-  let blocked = false;
   for (const e of events) {
+    if (!budget.allows(EVENT_QUERY_RESERVE)) {
+      out.budgetExhausted = true;
+      break;
+    }
     let drafts: EmailDraft[] | 'defer' = [];
     // Events from before the email feature was deployed are acknowledged without email.
     if (e.created_at >= settings.start) {
       try {
         drafts = await mapEvent(ctx, e);
       } catch (err) {
-        // Left without a receipt (and holding the cursor) so the next run retries it; later events go on.
-        console.error(`email projection of ${e.event_type} ${e.id} failed`, err);
+        const failures = (e.failures ?? 0) + 1;
         out.failed++;
-        blocked = true;
-        continue;
+        if (failures < MAX_EVENT_FAILURES) {
+          console.error(`email projection of ${e.event_type} ${e.id} failed (${failures}/${MAX_EVENT_FAILURES})`, err);
+          const message = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+          statements.push(deferralStatement(db, e.id, iso(nowMs + FAILURE_RETRY_MS), failures, message, now));
+          out.lastSeq = e.seq;
+          continue;
+        }
+        // One event must not block the projector forever: acknowledge it without email.
+        console.error(`email projection of ${e.event_type} ${e.id} abandoned after ${failures} failures; no email sent`, err);
+        out.abandoned++;
       }
     }
     if (drafts === 'defer') {
       out.deferred++;
-      blocked = true;
+      statements.push(deferralStatement(db, e.id, iso(nowMs + DEFER_RETRY_MS), e.failures ?? 0, 'waiting for the other boards of the lock', now));
+      out.lastSeq = e.seq;
       continue;
     }
+    await recipients.load(drafts.map(d => d.userId));
     for (const d of drafts) {
-      const r = await recipient(d.userId);
+      const r = recipients.get(d.userId);
       if (!r) continue;
       statements.push(...draftStatements(db, d, r, now));
-      if (!r.groups) r.groups = { products: true, boards: true, referrals: true };
+      r.groups ??= { products: true, boards: true, referrals: true };
       out.queued++;
     }
-    statements.push(db.prepare('INSERT INTO email_event_receipts (event_id, processed_at) VALUES (?, ?) ON CONFLICT (event_id) DO NOTHING').bind(e.id, now));
-    if (!blocked) cursor = e.seq;
+    statements.push(...receiptStatements(db, e.id, now));
+    out.lastSeq = e.seq;
   }
-  if (cursor > settings.cursor) {
-    // MAX keeps a concurrent run that got further from being moved back.
-    statements.push(db.prepare(`UPDATE email_settings SET value = CAST(MAX(CAST(value AS INTEGER), ?) AS TEXT) WHERE key = 'projection_cursor'`).bind(cursor));
-  }
-  if (statements.length) await db.batch(statements);
+  if (out.lastSeq > settings.high) statements.push(advanceHighStatement(db, out.lastSeq));
+  if (statements.length) await db.batch([...statements, catchUpCursorStatement(db)]);
   return out;
 }

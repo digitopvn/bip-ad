@@ -37,6 +37,9 @@ export async function mapLockResults(ctx: MappingContext, e: OutboxEvent, p: Pay
   const cutoffAt = await cutoffOf(ctx, e, p);
   if (!cutoffAt) return [];
   const cutoffMs = Date.parse(cutoffAt);
+  // A snapshot frozen more than a day after its cutoff is an operator back-fill, not tonight's
+  // lock: owners already moved on, so it is acknowledged without email.
+  if (Date.parse(e.created_at) - cutoffMs > DAY_MS) return [];
   const frozen = await ctx.db.prepare('SELECT COUNT(*) AS n FROM board_snapshots WHERE cutoff_at = ?').bind(cutoffAt).first<{ n: number }>();
   if ((frozen?.n ?? 0) < BOARDS.length && ctx.nowMs - cutoffMs < CATCH_UP_DAYS * DAY_MS) return 'defer';
 
@@ -53,9 +56,10 @@ export async function mapLockResults(ctx: MappingContext, e: OutboxEvent, p: Pay
   const byOwner = new Map<string, LockItemRow[]>();
   for (const r of results) byOwner.set(r.owner_id, [...(byOwner.get(r.owner_id) ?? []), r]);
 
+  const names = await ctx.displayNames([...byOwner.keys()]);
   const drafts: EmailDraft[] = [];
   for (const [userId, rows] of byOwner) {
-    const displayName = await ctx.displayName(userId);
+    const displayName = names.get(userId) ?? null;
     if (displayName === null) continue;
     const entries: LockEntry[] = rows
       .sort((a, b) => BOARDS.indexOf(a.board) - BOARDS.indexOf(b.board) || a.rank - b.rank)

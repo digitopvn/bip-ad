@@ -99,14 +99,15 @@ describe('email projection: one email per trigger', () => {
     const u = await makeUser('Patient');
     const p = await makeProduct(u, 'Partial Lock');
     await bid(u, p, 'daily', 700, cutoff - 3600_000);
-    await freezeBoard(db(), 'daily', cutoff);
+    // Frozen a minute after the cutoff, like the nightly lock (a much later freeze is a back-fill).
+    await freezeBoard(db(), 'daily', cutoff, cutoff + 60_000);
     const other = await makeUser('Unblocked');
     await makeProduct(other, 'Later Event');
     await projectAll();
     expect(await emailsOf(u, 'lock_results')).toEqual([]);
     expect(await emailsOf(other, 'product_decision')).toHaveLength(1);
-    await freezeBoard(db(), 'weekly', cutoff);
-    await freezeBoard(db(), 'monthly', cutoff);
+    await freezeBoard(db(), 'weekly', cutoff, cutoff + 120_000);
+    await freezeBoard(db(), 'monthly', cutoff, cutoff + 180_000);
     await projectAll();
     expect(await emailsOf(u, 'lock_results')).toHaveLength(1);
   });
@@ -116,7 +117,7 @@ describe('email projection: one email per trigger', () => {
     const u = await makeUser('Late');
     const p = await makeProduct(u, 'Old Lock', cutoff - 40 * DAY_MS);
     await bid(u, p, 'daily', 900, cutoff - 3600_000);
-    await freezeBoard(db(), 'daily', cutoff);
+    await freezeBoard(db(), 'daily', cutoff, cutoff + 3600_000);
     await projectAll();
     const rows = await emailsOf(u, 'lock_results');
     expect(rows.map(r => dataOf<{ entries: { board: string }[] }>(r).entries.map(e => e.board))).toEqual([['daily']]);

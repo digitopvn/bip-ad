@@ -45,13 +45,13 @@ export async function emailsOf(userId: string, kind?: string) {
 
 export const dataOf = <T = Record<string, unknown>>(row: EmailRow) => JSON.parse(row.data_json) as T;
 
-/** Records every message; `fail` makes send reject, `delayMs` widens race windows. */
-export function fakeTransport(opts: { fail?: boolean; delayMs?: number } = {}) {
+/** Records every message; `fail` makes send reject (with `fail` itself when it is an Error), `delayMs` widens race windows. */
+export function fakeTransport(opts: { fail?: boolean | Error; delayMs?: number } = {}) {
   const sent: OutgoingEmail[] = [];
   const transport: EmailTransport = {
     async send(m) {
       if (opts.delayMs) await new Promise(r => setTimeout(r, opts.delayMs));
-      if (opts.fail) throw new Error('provider unavailable');
+      if (opts.fail) throw opts.fail instanceof Error ? opts.fail : new Error('provider unavailable');
       sent.push(m);
       return { messageId: newId('msg') };
     },

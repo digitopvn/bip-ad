@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { savePreferences } from '../src/email/email-preferences';
+import { QueryBudget } from '../src/email/d1-query-meter';
 import { MAX_SEND_ATTEMPTS, RETRY_BACKOFF_MS, SEND_LEASE_MS, sendDueEmails } from '../src/email/email-sender';
 import { parseFromAddress, subjectPrefixFor } from '../src/email/email-transport';
-import { processEmails } from '../src/email/process-emails';
+import { processEmails, REQUEST_RUN } from '../src/email/process-emails';
 import type { Env } from '../src/env';
 import { newId } from '../src/lib/ids';
 import { iso } from '../src/lib/time';
@@ -82,6 +83,51 @@ describe('email sender', () => {
     expect(await send(failing.transport, t)).toMatchObject({ claimed: 1, failed: 1 });
     expect(await row(id)).toMatchObject({ status: 'failed', attempts: MAX_SEND_ATTEMPTS });
     expect((await send(fakeTransport().transport, t + 86400_000)).claimed).toBe(0);
+  });
+
+  it('a permanent provider error code fails the row at once and records the code; unknown errors keep retrying', async () => {
+    const t = nextClock();
+    const u = await makeUser('Bounced');
+    const id = await queue(u, 'welcome', t);
+    const err = Object.assign(new Error('recipient is on the suppression list'), { code: 'E_RECIPIENT_SUPPRESSED' });
+    expect(await send(fakeTransport({ fail: err }).transport, t)).toMatchObject({ claimed: 1, failed: 1, retried: 0 });
+    expect(await row(id)).toMatchObject({ status: 'failed', attempts: 1, last_error: 'E_RECIPIENT_SUPPRESSED: recipient is on the suppression list' });
+    const transient = await queue(u, 'welcome', t + 1000);
+    const busy = Object.assign(new Error('slow down'), { code: 'E_RATE_LIMIT_EXCEEDED' });
+    expect(await send(fakeTransport({ fail: busy }).transport, t + 1000)).toMatchObject({ claimed: 1, retried: 1 });
+    expect(await row(transient)).toMatchObject({ status: 'pending', last_error: 'E_RATE_LIMIT_EXCEEDED: slow down' });
+    await db().prepare('DELETE FROM email_outbox WHERE id = ?').bind(transient).run();
+  });
+
+  it('omits the one-click unsubscribe headers when the origin is not https', async () => {
+    const t = nextClock();
+    const u = await makeUser('Local Dev');
+    await queue(u, 'product_decision', t);
+    const fake = fakeTransport();
+    expect(await send(fake.transport, t, 'http://localhost:8787')).toMatchObject({ sent: 1 });
+    expect(fake.sent[0].headers).toBeUndefined();
+    expect(fake.sent[0].text).toContain('http://localhost:8787/email/unsubscribe?t=');
+  });
+
+  it('loads preferences for the whole batch in one query and never claims more than the query budget can record', async () => {
+    const t = nextClock();
+    const users = await Promise.all(['A', 'B', 'C', 'D'].map(n => makeUser(`Budget ${n}`)));
+    const ids = await Promise.all(users.map(u => queue(u, 'product_decision', t)));
+    const all = new QueryBudget(1000);
+    // Claim batch + preferences batch + one outcome write per row: 2 + 2 here regardless of the user count.
+    expect(await sendDueEmails(db(), fakeTransport().transport, { origin: ORIGIN, from: FROM, nowMs: t, limit: 2, budget: all })).toMatchObject({ claimed: 2, sent: 2 });
+    expect(all.used).toBe(4);
+    const tight = new QueryBudget(4);
+    expect(await sendDueEmails(db(), fakeTransport().transport, { origin: ORIGIN, from: FROM, nowMs: t, budget: tight })).toMatchObject({ claimed: 1, sent: 1 });
+    expect(tight.used).toBe(3);
+    expect((await sendDueEmails(db(), fakeTransport().transport, { origin: ORIGIN, from: FROM, nowMs: t, budget: new QueryBudget(3) })).claimed).toBe(0);
+    expect((await Promise.all(ids.map(row))).filter(r => r.status === 'sent')).toHaveLength(3);
+    // A request-time run sends at most REQUEST_RUN.sendLimit and stays under its query cap.
+    await Promise.all(Array.from({ length: REQUEST_RUN.sendLimit + 2 }, () => queue(users[0], 'welcome', t)));
+    const r = await processEmails(E, t, fakeTransport().transport);
+    expect(r.sending!.sent).toBe(REQUEST_RUN.sendLimit);
+    expect(r.queriesUsed).toBeLessThanOrEqual(REQUEST_RUN.queryCap);
+    await db().prepare(`DELETE FROM email_outbox WHERE status = 'pending' AND next_attempt_at = ?`).bind(iso(t)).run();
   });
 
   it('two concurrent runs never send the same email twice', async () => {

@@ -1,7 +1,7 @@
 import OAuthProvider from '@cloudflare/workers-oauth-provider';
 import { app } from './app';
 import { expireIntents } from './domain/bidding';
-import { processEmails, scheduleEmailProcessing } from './email/process-emails';
+import { CRON_RUN, processEmails, scheduleEmailProcessing } from './email/process-emails';
 import { config } from './domain/config';
 import { runDueLocks } from './domain/snapshot';
 import { vestCommissions } from './domain/wallet';
@@ -49,9 +49,6 @@ function oauthProvider(env: Env) {
 
 const SCOPES = ['bip.products', 'bip.boosts', 'bip.wallet'];
 
-/** Projection pages and send batches per cron run: up to 200 emails, enough for a lock run. */
-const CRON_EMAIL_ROUNDS = 8;
-
 /** Run one housekeeping step; its failure is logged and never blocks the lock. */
 async function isolated(name: string, fn: () => Promise<unknown>) {
   try {
@@ -78,7 +75,8 @@ export async function scheduledJob(env: Env, nowMs = Date.now()) {
   // Fallback for AI moderation jobs that failed or never ran inline (retries, stale runs, missing credentials at the time).
   await isolated('sweepPendingModeration', () => sweepPendingModeration(env, config(env), nowMs));
   // Transactional email last, so it covers the lock results, vested commissions and moderation decisions above.
-  await isolated('processEmails', () => processEmails(env, nowMs, undefined, CRON_EMAIL_ROUNDS));
+  // The current time, not nowMs: the steps above may have taken a while and leases/backoff are wall-clock.
+  await isolated('processEmails', () => processEmails(env, Date.now(), undefined, CRON_RUN));
   return locks;
 }
 

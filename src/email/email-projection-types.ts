@@ -18,14 +18,12 @@ export interface EmailDraft {
   data: EmailMessageData;
 }
 
-/** Display name of a user, or null when the user does not exist. */
-export type DisplayNameLookup = (userId: string) => Promise<string | null>;
-
 export interface MappingContext {
   db: D1Database;
   origin: string;
   nowMs: number;
-  displayName: DisplayNameLookup;
+  /** Display names of users, loaded in one query per chunk; null for a user that does not exist. */
+  displayNames: (userIds: string[]) => Promise<Map<string, string | null>>;
 }
 
 /** 'defer' leaves the event unhandled so a later run maps it again (see the lock results mapping). */

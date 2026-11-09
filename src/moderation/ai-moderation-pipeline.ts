@@ -7,6 +7,7 @@
 // retried by the hourly cron and never approve anything.
 import type { Config } from '../domain/config';
 import { DomainError } from '../domain/errors';
+import { processEmails } from '../email/process-emails';
 import { decisionStatement } from '../domain/ledger';
 import { moderateProduct, moderationScreen, pageScreen } from '../domain/products';
 import type { Env } from '../env';
@@ -247,7 +248,8 @@ export async function moderateAfterChange(env: Env, cfg: Config, productId: stri
     await finishJob(db, s.productId, s.version, 'done', 'fast stage deferred');
     return { state: 'needs_operator', reasons: fast.reasons };
   }
-  waitUntil(runFullSafely(db, cfg, deps, s));
+  // The verdict may approve or reject the product: send that email once the stage has settled.
+  waitUntil(runFullSafely(db, cfg, deps, s).then(() => processEmails(env)));
   return { state: 'scoring', reasons: fast.reasons };
 }
 

@@ -220,6 +220,9 @@ app.get('/checkout/:id/paypal-return', async c => {
   const cap = await captureOrder(c.env, token);
   if (cap.capture?.status === 'COMPLETED' && cap.capture.custom_id === id) {
     const r = await processEvent(c.env.DB, cfg, normalizePayPal({ id: `capture:${cap.capture.id}`, event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: cap.capture.id, status: 'COMPLETED', custom_id: id, amount: cap.capture.amount } }));
+    // A GET skips the post-request email hook, so schedule the receipt email here once settled.
+    const wait = waitUntilOf(c);
+    if (wait) scheduleEmailProcessing(c.env, wait);
     return c.redirect(`/checkout/${id}?r=${r.status === 'settled' || r.status === 'duplicate' || r.status === 'replayed' ? 'paid' : 'success'}`, 303);
   }
   return c.redirect(`/checkout/${id}?r=success`, 303);

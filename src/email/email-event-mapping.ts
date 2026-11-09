@@ -15,7 +15,7 @@ function decisionReason(p: Payload): string {
 }
 
 async function draftFor(ctx: MappingContext, userId: string, kind: EmailKind, dedupeKey: string, build: (displayName: string) => EmailMessageData): Promise<EmailDraft[]> {
-  const name = await ctx.displayName(userId);
+  const name = (await ctx.displayNames([userId])).get(userId) ?? null;
   if (name === null) {
     console.warn(`email: user ${userId} not found for ${dedupeKey}`);
     return [];
