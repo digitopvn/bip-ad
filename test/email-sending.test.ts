@@ -152,7 +152,8 @@ describe('email sender', () => {
     const r = await processEmails(E, t, fake.transport);
     // Also delivers rows left 'sending' by the lease test once their lease expired.
     expect(r.sending!.sent).toBeGreaterThanOrEqual(1);
-    expect(fake.sent[0].from).toEqual({ name: 'bip.ad', email: 'noreply@bip.ad' });
+    expect(fake.sent[0].from).toEqual({ name: 'bip.ad', email: 'hello@bip.ad' });
+    expect(fake.sent[0].replyTo).toBe('hello@bip.ad');
     expect((await processEmails(E, t, fake.transport)).idle).toBe(true);
   });
 });

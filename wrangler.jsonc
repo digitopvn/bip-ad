@@ -39,8 +39,9 @@
     "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
     "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
     "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init",
-    // Sender of transactional email. Optional EMAIL_REPLY_TO adds a Reply-To header.
-    "EMAIL_FROM": "bip.ad <noreply@bip.ad>"
+    // Sender of transactional email and its Reply-To. hello@bip.ad is a real inbox (Email Routing forwards it).
+    "EMAIL_FROM": "bip.ad <hello@bip.ad>",
+    "EMAIL_REPLY_TO": "hello@bip.ad"
   },
   "observability": { "enabled": true },
 
@@ -83,7 +84,8 @@
         "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
         "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
         "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init",
-        "EMAIL_FROM": "bip.ad <noreply@bip.ad>"
+        "EMAIL_FROM": "bip.ad <hello@bip.ad>",
+        "EMAIL_REPLY_TO": "hello@bip.ad"
       }
     }
   }
