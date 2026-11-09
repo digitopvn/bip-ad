@@ -66,6 +66,17 @@ export async function captureOrder(env: Env, orderId: string, fetcher: typeof fe
   return { status: body.status, capture };
 }
 
+/**
+ * Body for verify-webhook-signature with the event spliced in byte for byte. PayPal checks the
+ * signature against the event exactly as it sent it, so `webhook_event` must not be re-serialized
+ * (JSON.parse + JSON.stringify can reorder keys, drop whitespace and rewrite numbers).
+ * `rawEvent` must already be known to be valid JSON.
+ */
+export function verificationRequestBody(fields: Record<string, string>, rawEvent: string): string {
+  const head = JSON.stringify(fields);
+  return `${head.slice(0, -1)},"webhook_event":${rawEvent}}`;
+}
+
 /** Verify a webhook with PayPal's verify-webhook-signature API (A19). */
 export async function verifyWebhook(env: Env, headers: Headers, rawBody: string, fetcher: typeof fetch = fetch): Promise<PayPalEvent | null> {
   if (!env.PAYPAL_WEBHOOK_ID) return null;
@@ -81,15 +92,14 @@ export async function verifyWebhook(env: Env, headers: Headers, rawBody: string,
   const r = await fetcher(`${env.PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature`, {
     method: 'POST',
     headers: { authorization: `Bearer ${t}`, 'content-type': 'application/json' },
-    body: JSON.stringify({
+    body: verificationRequestBody({
       auth_algo: h('paypal-auth-algo'),
       cert_url: h('paypal-cert-url'),
       transmission_id: h('paypal-transmission-id'),
       transmission_sig: h('paypal-transmission-sig'),
       transmission_time: h('paypal-transmission-time'),
       webhook_id: env.PAYPAL_WEBHOOK_ID,
-      webhook_event: event,
-    }),
+    }, rawBody),
   });
   if (!r.ok) return null;
   const v = (await r.json()) as { verification_status?: string };

@@ -5,6 +5,7 @@ import { loadStandings } from '../src/domain/ranking';
 import { newId } from '../src/lib/ids';
 import { normalizePayPal, normalizeSePay, processEvent } from '../src/payments/process';
 import { verifyWebhook } from '../src/payments/paypal';
+import { app } from '../src/app';
 import { signCheckoutFields, verifyIpn } from '../src/payments/sepay';
 import { E, db, ledgerBalancedEverywhere, makeProduct, makeUser } from './helpers';
 
@@ -76,6 +77,66 @@ describe('PayPal', () => {
     expect(await verifyWebhook(env, headers, body, fetcher('FAILURE'))).toBeNull();
     expect(await verifyWebhook(env, new Headers(), body, fetcher('SUCCESS'))).toBeNull();
     expect(await verifyWebhook({ ...env, PAYPAL_WEBHOOK_ID: undefined }, headers, body, fetcher('SUCCESS'))).toBeNull();
+  });
+
+  it('A19: the event is sent to verify-webhook-signature byte for byte, not re-serialized', async () => {
+    const env = { ...E, PAYPAL_CLIENT_ID: 'id', PAYPAL_CLIENT_SECRET: 'sec', PAYPAL_WEBHOOK_ID: 'WH-ID', PAYPAL_API_BASE: 'https://paypal.test' };
+    // Spacing, key order and a number form that JSON.stringify would rewrite.
+    const raw = '{ "resource": {"id":"CAP-RAW", "amount": {"value": "1.00", "fee": 1.50}}, "id" : "WH-RAW",\n "event_type":"PAYMENT.CAPTURE.COMPLETED", "n": 1e2 }';
+    const headers = new Headers({ 'paypal-transmission-id': 't1', 'paypal-transmission-sig': 'sig', 'paypal-cert-url': 'https://api.paypal.com/cert', 'paypal-auth-algo': 'SHA256withRSA', 'paypal-transmission-time': '2026-11-09T00:00:00Z' });
+    let sent = '';
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/v1/oauth2/token')) return Response.json({ access_token: 'tok' });
+      sent = String(init?.body);
+      return Response.json({ verification_status: 'SUCCESS' });
+    }) as unknown as typeof fetch;
+    expect((await verifyWebhook(env, headers, raw, fetcher))?.id).toBe('WH-RAW');
+    expect(sent.endsWith(`,"webhook_event":${raw}}`)).toBe(true);
+    const parsed = JSON.parse(sent);
+    expect(parsed.webhook_id).toBe('WH-ID');
+    expect(parsed.webhook_event.id).toBe('WH-RAW');
+  });
+
+  it('PayPal return GET has no side effects; only the POST it renders captures and settles', async () => {
+    const { p, intent } = await openIntent('paypal');
+    const orderId = `ORDER-${intent.id}`;
+    await db().prepare('UPDATE bid_intents SET provider_order_id = ? WHERE id = ?').bind(orderId, intent.id).run();
+    const sandboxEnv = { ...E, PAYMENT_MODE: 'sandbox', PAYPAL_CLIENT_ID: 'id', PAYPAL_CLIENT_SECRET: 'sec', PAYPAL_API_BASE: 'https://paypal.test' };
+    const calls: string[] = [];
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: string | URL | Request) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.endsWith('/v1/oauth2/token')) return Response.json({ access_token: 'tok' });
+      return Response.json({ status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ id: `CAP-RET-${intent.id}`, status: 'COMPLETED', custom_id: intent.id, amount: { currency_code: 'USD', value: '15.00' } }] } }] });
+    });
+    try {
+      const base = `https://bip.test/checkout/${intent.id}`;
+      const get = await app.request(`${base}/paypal-return?token=${orderId}`, {}, sandboxEnv);
+      expect(get.status).toBe(200);
+      const page = await get.text();
+      expect(page).toContain(`action="/checkout/${intent.id}/paypal-capture"`);
+      expect(page).toContain(`value="${orderId}"`);
+      expect(calls).toEqual([]);
+      expect(await contributions(intent.id)).toBe(0);
+
+      const post = (token: string) => app.request(`${base}/paypal-capture`, { method: 'POST', body: new URLSearchParams({ token }) }, sandboxEnv);
+      const bad = await post('ORDER-other');
+      expect(bad.headers.get('location')).toBe(`/checkout/${intent.id}?r=error`);
+      expect(calls).toEqual([]);
+
+      const ok = await post(orderId);
+      expect(ok.status).toBe(303);
+      expect(ok.headers.get('location')).toBe(`/checkout/${intent.id}?r=paid`);
+      expect(calls.some(u => u.endsWith(`/v2/checkout/orders/${orderId}/capture`))).toBe(true);
+      expect(await contributions(intent.id)).toBe(1);
+      expect(await activeUnits(p)).toBe(1500);
+
+      // Once settled, following the return link again just shows the checkout.
+      const again = await app.request(`${base}/paypal-return?token=${orderId}`, { redirect: 'manual' }, sandboxEnv);
+      expect(again.headers.get('location')).toBe(`/checkout/${intent.id}`);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('A07: refund after the bid is active voids the contribution with a corrective posting; a replayed refund is a no-op', async () => {
