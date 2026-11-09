@@ -104,3 +104,22 @@ export function checkoutPage(ctx: LayoutContext, view: CheckoutView): string {
 </section>`;
   return layout(ctx, body.toString());
 }
+
+/**
+ * Landing page for PayPal's return redirect. The GET only shows this; the capture runs on the
+ * POST it submits, so link prefetchers and previews that follow the return URL cannot capture.
+ */
+export function paypalReturnPage(ctx: LayoutContext, intentId: string, orderToken: string): string {
+  const body = html`<section class="section-tight checkout" aria-labelledby="co-title">
+  <div class="wrap narrow">
+    <p class="kicker">Checkout</p>
+    <h1 class="h2" id="co-title">Complete your PayPal payment</h1>
+    ${notice('info', 'PayPal approved the payment. It is not taken until you complete it here, and your rank moves only after PayPal confirms it.')}
+    <form class="pay-form panel-box" method="post" action="/checkout/${seg(intentId)}/paypal-capture">
+      <input type="hidden" name="token" value="${orderToken}">
+      <button class="btn btn-primary" type="submit">Complete payment ${icon('arrow')}</button>
+    </form>
+  </div>
+</section>`;
+  return layout(ctx, body.toString());
+}

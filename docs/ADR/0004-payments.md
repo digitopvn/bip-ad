@@ -21,6 +21,8 @@ Real sandbox credentials were out of scope for this MVP. The sandbox and live pa
 - A payment is confirmed by either:
   - a webhook verified through `/v1/notifications/verify-webhook-signature`, or
   - the response of the server-side capture call.
+- The verification request carries the webhook body byte for byte (`verificationRequestBody` in [`paypal.ts`](../../src/payments/paypal.ts)), because PayPal checks the signature against the event exactly as it was sent.
+- PayPal's return redirect (`GET /checkout/{id}/paypal-return?token=…`) has no side effects. It renders a page whose button POSTs to `/checkout/{id}/paypal-capture`, and only that POST captures the order. Link prefetchers and previews that follow the return URL therefore cannot capture. The order token is the credential, so the POST does not need a session.
 - `PENDING` and `DENIED` captures never confirm a bid.
 - `REFUNDED` and `REVERSED` run the refund path. The capture is resolved through `links[rel=up]`.
 - A `REFUNDED` event carries that refund's own amount. A **partial refund keeps the bid**: it is recorded in `payment_reviews` for the operator, and the ledger is not changed automatically. When the recorded refunds of a capture add up to the captured cash, the whole payment is reversed like a full refund and those reviews are closed.

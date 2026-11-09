@@ -72,6 +72,19 @@ export const hasProjectionWorkSql = () =>
   `(EXISTS (SELECT 1 FROM outbox_events WHERE rowid > (SELECT CAST(value AS INTEGER) FROM email_settings WHERE key = 'projection_high'))
     OR EXISTS (SELECT 1 FROM email_event_deferrals WHERE retry_after <= ?1))`;
 
+/**
+ * Backlog of the email projector, the only consumer of outbox_events: events it has not handled
+ * yet (no receipt), and those of them deferred for a retry. outbox_events.status is not used.
+ */
+export async function emailProjectionBacklog(db: D1Database): Promise<{ unhandled: number; deferred: number }> {
+  const r = await db.prepare(`SELECT
+      (SELECT COUNT(*) FROM outbox_events e
+        WHERE e.rowid > (SELECT CAST(value AS INTEGER) FROM email_settings WHERE key = 'projection_cursor')
+          AND NOT EXISTS (SELECT 1 FROM email_event_receipts r WHERE r.event_id = e.id)) AS unhandled,
+      (SELECT COUNT(*) FROM email_event_deferrals) AS deferred`).first<{ unhandled: number; deferred: number }>();
+  return { unhandled: r?.unhandled ?? 0, deferred: r?.deferred ?? 0 };
+}
+
 /** True when an event above projection_high exists (written after the last page was read). */
 export async function hasUnseenEvents(db: D1Database) {
   const r = await db.prepare(`SELECT EXISTS (SELECT 1 FROM outbox_events WHERE rowid > (SELECT CAST(value AS INTEGER) FROM email_settings WHERE key = 'projection_high')) AS n`)
