@@ -20,7 +20,7 @@ function walletTable(w: AccountView['wallet']): SafeHtml {
     ['Paid out', w.paid],
   ];
   const currencies = [...new Set(columns.flatMap(([, lines]) => lines.map((l) => l.currency.toUpperCase())))].sort();
-  if (!currencies.length) return html`<p class="muted">No commission yet. You earn 5% when someone you referred makes their first confirmed bid.</p>`;
+  if (!currencies.length) return html`<p class="muted">No commission yet. You earn 5% of the first bid each account you referred pays with PayPal or SePay.</p>`;
   const amount = (lines: MoneyLine[], currency: string): string => {
     const total = lines.filter((l) => l.currency.toUpperCase() === currency).reduce((sum, l) => sum + l.minor, 0);
     return formatMoney(currency, total);
@@ -112,7 +112,7 @@ export function accountPage(ctx: LayoutContext, view: AccountView, email?: Accou
 
     <section class="acct-sec" id="referrals" aria-labelledby="referrals-title">
       <h2 id="referrals-title">Referrals</h2>
-      <p class="muted">You earn 5% commission when someone you referred makes their first confirmed bid. Successful referrals also break ties between equal bids on all your products.</p>
+      <p class="muted">You earn 5% commission on the first bid each account you referred pays with PayPal or SePay; later bids and wallet-funded bids earn nothing. Successful referrals also break ties between equal bids on all your products.</p>
       <div class="acct-cards">
         <div class="panel-box stat"><span class="stat-k">Successful</span><span class="stat-v">${view.referral.successful}</span></div>
         <div class="panel-box stat"><span class="stat-k">Pending</span><span class="stat-v">${view.referral.pending}</span></div>
