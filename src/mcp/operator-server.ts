@@ -129,7 +129,7 @@ export function operatorMcpServer(env: Env) {
     return { reviews: results };
   });
 
-  jsonTool(server, 'payments.resolve_review', 'Resolve a payment review: settle (a capture of exactly the full quote) or dismiss (money handled at the provider, e.g. refunded). Logged.', {
+  jsonTool(server, 'payments.resolve_review', 'Resolve a payment review: settle (a capture of exactly the full quote that the provider has not partly refunded) or dismiss (money handled at the provider, e.g. refunded). Settling a partly refunded capture is refused (not_settleable, partially_refunded) and dismisses the review. status "settling" means another request is settling it. Logged.', {
     review_id: z.string(), resolution: z.enum(['settle', 'dismiss']), note: z.string().min(3).max(300),
   }, false, async a => resolvePaymentReview(db, cfg, ACTOR, a.review_id, a.resolution, a.note));
 

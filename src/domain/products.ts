@@ -226,7 +226,8 @@ export async function moderateProduct(db: D1Database, actor: string, productId: 
       .bind(status, status, now, now, p.id),
   ];
   if (decision === 'approve') {
-    stmts.push(...publishLatestPageStatements(db, p.id, now));
+    // The pending page is the one that goes live; only without one does the latest draft (or the current page) get published.
+    if (!p.pending_page_version_id) stmts.push(...publishLatestPageStatements(db, p.id, now));
     if (p.pending_edit_json) {
       const e = JSON.parse(p.pending_edit_json) as Pick<ProductRow, 'name' | 'tagline' | 'website_url' | 'image_url'>;
       stmts.push(db.prepare('UPDATE products SET name = ?, tagline = ?, website_url = ?, image_url = ?, pending_edit_json = NULL WHERE id = ?').bind(e.name, e.tagline, e.website_url, e.image_url, p.id));
