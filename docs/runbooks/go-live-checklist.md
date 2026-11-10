@@ -16,7 +16,7 @@ Status as of 2026-11-10. The source is the decision brief, §11 Phase 5. Explici
 | Bank reconciliation, finance dashboard | Partial | `finance.reconcile` checks the ledger against itself only. Reconciliation against PayPal settlement reports is done by hand. |
 | Referral payout disclosure, 5% policy | Partial | The 5% applies to the first external-cash bid only, approved by the owner on 2026-11-10 ([ADR-0005](../ADR/0005-referrals-wallet-payouts.md)). Payouts are manual on days 01–10. The other referral defaults and the tax disclosure still need owner approval. |
 | Backup/restore, monitoring, SLOs, runbooks, incident response | Done | This folder. Do one restore drill (see [backup-restore](backup-restore.md)). |
-| Social posting | **Off** | `SOCIAL_MODE=mock`. To turn it on, see "Owner actions" below. |
+| Social posting | **On** in production (2026-11-10) | `SOCIAL_MODE=live` on production with the BIPAD Zernio accounts (X, Facebook, YouTube, TikTok). Nothing posts until an operator calls `social.publish`. Staging stays `mock` because it shares the same public accounts. |
 | Paid ads | **Off** (dry run) | `ADS_MODE=dry_run`, `ADS_LIVE_APPROVED=false`. Needs separate owner approval. |
 
 ## Owner actions
