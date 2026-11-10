@@ -11,6 +11,9 @@ import type { Env, McpProps } from './env';
 import { serveMcp } from './mcp/common';
 import { userMcpServer } from './mcp/user-server';
 import { sweepPendingModeration } from './moderation/ai-moderation-pipeline';
+import { runAdsCycle } from './ads/ads-hourly-cycle';
+import { reconcile } from './mcp/operator-server';
+import { sendOperatorAlerts } from './monitoring/operator-alerts';
 
 /** /mcp: reached only with a valid OAuth access token; the provider puts the grant props on ctx.props. */
 const mcpApi = {
@@ -88,7 +91,9 @@ const pageFor = (budget: QueryBudget, step: keyof typeof HOUSEKEEPING_QUERIES) =
  * One lock/housekeeping cron invocation, within `cap` D1 queries. In priority order:
  * 1. the 03:12 ICT lock and catch-up of missed cutoffs, step by step while the budget allows;
  * 2. the hourly ranking metric rollup the live boards read;
- * 3. housekeeping pages sized to what is left (quote expiry, commission vesting, AI moderation sweep).
+ * 3. the ads and monitoring cycle (reconcile guard and pause, flight planning and dry-run execution,
+ *    hourly metrics, operator alert detection), each step only when it fits;
+ * 4. housekeeping pages sized to what is left (quote expiry, commission vesting, AI moderation sweep).
  * Every step is idempotent and works oldest-first, so whatever does not fit resumes on the next
  * hourly run. A lock failure is retried by the hourly trigger; housekeeping failures never block the lock.
  */
@@ -103,6 +108,7 @@ export async function scheduledJob(env: Env, nowMs = Date.now(), cap = SCHEDULED
     console.error('lock run failed', e);
   }
   if (budget.allows(2)) await isolated('refreshMetricRollup', () => refreshMetricRollup(db, nowMs));
+  await isolated('adsCycle', () => runAdsCycle({ ...env, DB: db }, cfg, reconcile, nowMs, budget));
   const expire = pageFor(budget, 'expire');
   if (expire) await isolated('expireIntents', () => expireIntents(db, nowMs, undefined, expire));
   const vest = pageFor(budget, 'vest');
@@ -122,6 +128,8 @@ export async function runScheduled(cron: string, env: Env) {
   if (cron === EMAIL_CRON) {
     const r = await processEmails(env, Date.now(), undefined, CRON_RUN);
     console.log('email run', JSON.stringify({ projection: r.projection, sending: r.sending, queries: r.queriesUsed }));
+    // Operator alerts queued by the hourly cycle go out with the rest of the email.
+    await isolated('sendOperatorAlerts', () => sendOperatorAlerts(env, config(env).origin));
     return r;
   }
   const locks = await scheduledJob(env);

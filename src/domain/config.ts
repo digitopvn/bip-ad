@@ -25,6 +25,10 @@ export const SIMULATED_MAX_RANK_UNITS = 100_000;
 export type ModerationMode = 'screen' | 'manual' | 'ai';
 
 export type PaymentMode = 'simulated' | 'sandbox' | 'live';
+/** dry_run: ad requests are recorded and never sent; no money is spent. */
+export type AdsMode = 'dry_run' | 'live';
+/** mock: publications are recorded as mocked and nothing is posted. */
+export type SocialMode = 'mock' | 'live';
 export type Currency = 'USD' | 'VND';
 
 export interface Config {
@@ -40,6 +44,18 @@ export interface Config {
   /** True only in the screen mode: the regex screen alone publishes inline. Other modes defer to the AI job or the operator. */
   autoApprove: boolean;
   origin: string;
+  adsMode: AdsMode;
+  /** ADS_KILL_SWITCH=true: the configuration-level kill switch (the operator one lives in operator_settings). */
+  adsKillSwitch: boolean;
+  socialMode: SocialMode;
+}
+
+/** Parse an enumerated mode variable: unset is the safe default, a typo is a configuration error (fail closed). */
+function modeVar<T extends string>(name: string, value: string | undefined, allowed: readonly T[], fallback: T): T {
+  const v = (value ?? '').trim();
+  if (!v) return fallback;
+  if (!(allowed as readonly string[]).includes(v)) throw new Error(`Invalid ${name} "${v}": use ${allowed.join(' or ')}`);
+  return v as T;
 }
 
 const int = (v: string | undefined, d: number) => {
@@ -63,6 +79,9 @@ export function config(env: Env): Config {
   }
   let mode: PaymentMode = raw === 'live' || raw === 'sandbox' ? raw : 'simulated';
   if (mode === 'live' && env.LIVE_PAYMENTS !== 'true') mode = 'sandbox';
+  // Paid ads mirror live payments: ADS_MODE=live also needs the owner's explicit ADS_LIVE_APPROVED flag; otherwise it stays a dry run.
+  let adsMode = modeVar<AdsMode>('ADS_MODE', env.ADS_MODE, ['dry_run', 'live'], 'dry_run');
+  if (adsMode === 'live' && env.ADS_LIVE_APPROVED !== 'true') adsMode = 'dry_run';
   return {
     paymentMode: mode,
     minBidUnits: int(env.MIN_BID_UNITS, 100),
@@ -75,5 +94,8 @@ export function config(env: Env): Config {
     moderationMode,
     autoApprove: moderationMode === 'screen',
     origin: (env.PUBLIC_ORIGIN || 'http://localhost:8787').replace(/\/$/, ''),
+    adsMode,
+    adsKillSwitch: (env.ADS_KILL_SWITCH ?? '').trim() === 'true',
+    socialMode: modeVar<SocialMode>('SOCIAL_MODE', env.SOCIAL_MODE, ['mock', 'live'], 'mock'),
   };
 }
