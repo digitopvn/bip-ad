@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareRank, loadStandings, rankProducts, type RankInput } from '../src/domain/ranking';
+import { compareRank, loadStandings, rankProducts, type RankInput, refreshMetricRollup } from '../src/domain/ranking';
 import { recordEvent } from '../src/domain/measurement';
 import { DAY_MS, HOUR_MS } from '../src/lib/time';
 import { bid, db, makeProduct, makeUser } from './helpers';
@@ -79,10 +79,13 @@ describe('live standings from D1', () => {
     await recordEvent(db(), { productId: a, type: 'outbound_click', visitor: 'v1', source: 'test', nowMs: at - HOUR_MS + 1 });
     for (const v of ['v1', 'v2', 'v3', 'v4']) await recordEvent(db(), { productId: b, type: 'product_page_view', visitor: v, source: 'test', nowMs: at - HOUR_MS });
     await recordEvent(db(), { productId: b, type: 'outbound_click', visitor: 'v9', source: 'test', nowMs: at - HOUR_MS });
+    // Live boards read the hourly rollup, not raw rows.
+    await refreshMetricRollup(db(), at);
     const rows = (await loadStandings(db(), 'daily', at)).filter(r => [a, b].includes(r.productId));
     expect(rows.map(r => r.productId)).toEqual([a, b]);
     expect(rows[0].validClicks).toBe(2);
     // Outside the 30-day window nothing counts.
+    await refreshMetricRollup(db(), at + 31 * DAY_MS);
     const later = (await loadStandings(db(), 'daily', at + 31 * DAY_MS)).find(r => r.productId === a);
     expect(later?.validClicks).toBe(0);
   });
