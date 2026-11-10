@@ -113,8 +113,14 @@ describe('daily lock', () => {
   it('the scheduled job vests, expires and locks idempotently', async () => {
     const now = cutoffForIctDate('2032-07-01') + 60_000;
     const r1 = await scheduledJob(E, now);
-    const r2 = await scheduledJob(E, now + 3600_000);
     expect(r1.at(-1)!.skipped).toBe(false);
+    // A full catch-up does not fit one invocation's query budget: following hourly runs finish it.
+    let hour = 1;
+    for (let r = r1; !r.every(x => x.complete); hour++) {
+      expect(hour).toBeLessThan(6);
+      r = await scheduledJob(E, now + hour * 3600_000);
+    }
+    const r2 = await scheduledJob(E, now + hour * 3600_000);
     expect(r2.every(x => x.skipped)).toBe(true);
   });
 });
