@@ -1,6 +1,7 @@
 import { SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { runLock } from '../src/domain/snapshot';
+import { checkoutPage } from '../src/views/checkout';
 import { cutoffAtOrBefore, ictDate } from '../src/lib/time';
 import { bid, db, makeProduct, makeUser } from './helpers';
 
@@ -60,6 +61,31 @@ describe('public routes', () => {
     expect((await SELF.fetch(`${BASE}/p/${d.slug}`)).status).toBe(404);
   });
 
+  it('serves the legal pages with the site layout and links them from every footer', async () => {
+    for (const [path, title] of [['/terms', 'Terms of Service'], ['/privacy', 'Privacy Policy'], ['/refunds', 'Refund Policy']] as const) {
+      const r = await SELF.fetch(BASE + path);
+      expect(r.status, path).toBe(200);
+      const html = await r.text();
+      expect(html, path).toContain(`<h1 class="h2" id="${path.slice(1)}-title">${title}</h1>`);
+      expect(html, path).toContain('class="site-footer"');
+      expect(html, path).toContain('does not replace advice from a lawyer');
+    }
+    const home = await SELF.fetch(`${BASE}/`).then(r => r.text());
+    for (const href of ['/terms', '/privacy', '/refunds']) expect(home).toContain(`href="${href}"`);
+  });
+
+  it('the checkout page links to the Terms and the Refund Policy next to the all-pay notice', () => {
+    const page = checkoutPage({ title: 'Checkout', path: '/checkout/bid_x', viewer: null, testMode: true, origin: BASE }, {
+      intentId: 'bid_x', status: 'awaiting_payment', productName: 'P', productSlug: 'p', board: 'daily', rankUnits: 100, quoteCurrency: 'USD',
+      quoteMinor: 100, walletAppliedMinor: 0, dueMinor: 100, fxRate: null, quoteExpiresAt: new Date().toISOString(), activeHours: 24,
+      projectedRank: 1, providers: ['paypal'], paymentMode: 'simulated', isOwner: true, csrf: 'c', message: null,
+    });
+    const notice = page.slice(page.indexOf('class="all-pay"'));
+    expect(notice.indexOf('href="/terms"')).toBeGreaterThan(0);
+    expect(notice.indexOf('href="/refunds"')).toBeGreaterThan(0);
+    expect(notice.indexOf('href="/refunds"')).toBeLessThan(notice.indexOf('class="pay-options"'));
+  });
+
   it('referral links only set a cookie for real codes and never redirect off-site', async () => {
     const r = await SELF.fetch(`${BASE}/r/zzzzzzzz`, { redirect: 'manual' });
     expect(r.status).toBe(302);
@@ -90,5 +116,22 @@ describe('MCP endpoints', () => {
     const j = await ok.json() as { result: { tools: { name: string }[] } };
     const names = j.result.tools.map(t => t.name);
     expect(names).toEqual(expect.arrayContaining(['products.moderate', 'boards.freeze', 'payouts.prepare_batch', 'payouts.record_manual_transfer', 'finance.reconcile']));
+  });
+});
+
+describe('content security policy', () => {
+  it('lets the checkout form redirect to the payment hosts', async () => {
+    const r = await SELF.fetch(`${BASE}/`, { headers: UA });
+    const formAction = (r.headers.get('content-security-policy') ?? '').split(';').map(d => d.trim()).find(d => d.startsWith('form-action')) ?? '';
+    for (const host of ['https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://pay.sepay.vn']) {
+      expect(formAction, host).toContain(host);
+    }
+  });
+
+  it('drops form-action on the consent page, whose redirect ends at the client', async () => {
+    const r = await SELF.fetch(`${BASE}/authorize?response_type=code`, { headers: UA });
+    const csp = r.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).not.toContain('form-action');
   });
 });

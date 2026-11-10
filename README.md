@@ -6,7 +6,9 @@
 - When bids are equal, including zero, ties are broken by the owner's successful referrals, then valid unique clicks, then valid unique views.
 - 80% of each board's bid revenue funds that board's ads. Referrers earn a 5% commission. Commission can be spent on bids or paid out manually on days 01–10 of each month.
 
-> Status: MVP (Phases 1–3 of [the decision brief](docs/BIP_AD_Decision_Brief_v1.1.md)). Payments run in **simulated mode**, so no money moves. Video, social and ads adapters are mocks. Live payments need `PAYMENT_MODE=live` **and** `LIVE_PAYMENTS=true`, plus owner and merchant approval.
+> Status: MVP (Phases 1–3 of [the decision brief](docs/BIP_AD_Decision_Brief_v1.1.md)). Staging takes **PayPal sandbox** payments and production takes **live PayPal** payments (`PAYMENT_MODE=live` with `LIVE_PAYMENTS=true`, approved by the owner on 2026-11-09). A provider is offered only once its secrets are set, so SePay stays unavailable until it is configured. Video, social and ads adapters are mocks.
+
+Policies are public at `/terms`, `/privacy` and `/refunds` (linked from the footer and checkout; owner legal review pending before live payments).
 
 ## Stack
 Cloudflare Workers, Hono, D1 (data and double-entry ledger), KV (OAuth and sessions), Cron Triggers, `@cloudflare/workers-oauth-provider`, and `@modelcontextprotocol/sdk` (Streamable HTTP). Tests run on Vitest with `@cloudflare/vitest-pool-workers`.
@@ -48,7 +50,7 @@ Two environments live in `wrangler.jsonc`:
 
 | Environment | Branch | Worker | URL | Config |
 |---|---|---|---|---|
-| Staging | `dev` | `bip-ad` | https://bip-ad.digitop-vn.workers.dev | top level (`--env=""`) |
+| Staging | `dev` | `bip-ad` | https://bip-ad.digitop.workers.dev | top level (`--env=""`) |
 | Production | `main` | `bip-ad-production` | https://bip.ad, https://www.bip.ad | `env.production` (`--env production`) |
 
 Both environments run AI moderation (`MODERATION_MODE=ai`, [ADR-0008](docs/ADR/0008-ai-moderation.md)). Every submission and edit is scored: the regex screen and a fast decision model (Clef-flash) run inline, then the landing page is fetched and scored by Clef together with an evidence LLM (DeepSeek V4.1 Flash). Low-risk changes publish automatically. Everything else waits for the operator's agent over `/operator/mcp` (`products.pending` shows the scores, then `products.moderate`). Workers AI runs on its own Cloudflare account, so each environment needs the secrets `AI_CLOUDFLARE_ACCOUNT_ID` and `AI_CLOUDFLARE_API_TOKEN`. Without them, every change waits for the operator.
@@ -62,6 +64,9 @@ pnpm db:migrate:production
 for s in SESSION_SECRET OPERATOR_TOKEN; do wrangler secret put $s --env production; done
 scripts/set-worker-secrets.sh production   # hidden prompts for GitHub/Google OAuth; stores them in `ak secrets` and on the worker
 scripts/set-worker-secrets.sh production AI_CLOUDFLARE_ACCOUNT_ID AI_CLOUDFLARE_API_TOKEN   # Workers AI account for moderation
+scripts/setup-paypal.sh production   # Live REST app: checks the credentials, creates or reuses the webhook, stores PAYPAL_CLIENT_ID/SECRET/WEBHOOK_ID
+# Credentials already in the vault: same checks and webhook, uploads to the worker without prompts
+ak secrets run --env PAYPAL_CLIENT_ID=BIPAD_PAYPAL_CLIENT_ID_STAGING --env PAYPAL_CLIENT_SECRET=BIPAD_PAYPAL_CLIENT_SECRET_STAGING -- "$PWD/scripts/paypal-webhook-and-worker-secrets.mjs" staging
 pnpm deploy:production
 ```
 

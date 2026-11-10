@@ -20,16 +20,19 @@ import { operatorMcpServer } from './mcp/operator-server';
 import { captureOrder, verifyWebhook } from './payments/paypal';
 import { normalizePayPal, normalizeSePay, processEvent, simulatePayment } from './payments/process';
 import { checkoutForm, verifyIpn } from './payments/sepay';
-import { createProviderCheckout } from './payments/checkout';
+import { assertProviderEnabled, createProviderCheckout } from './payments/checkout';
 import { scheduleEmailProcessing } from './email/process-emails';
 import { accountEmailView, registerEmailRoutes } from './routes/email-routes';
 import { accountView, boardView, checkoutView, homeView, layoutCtx, productView, snapshotView } from './routes/view-data';
 import { accountPage } from './views/account';
 import { authorizePage } from './views/authorize';
 import { boardPage } from './views/board';
-import { checkoutPage } from './views/checkout';
+import { checkoutPage, paypalReturnPage } from './views/checkout';
 import { errorPage } from './views/error';
 import { homePage } from './views/home';
+import { privacyPage } from './views/legal-privacy-page';
+import { refundsPage } from './views/legal-refunds-page';
+import { termsPage } from './views/legal-terms-page';
 import { escapeHtml } from './views/html';
 import { loginPage, safeNext } from './views/login';
 import { productPage } from './views/product';
@@ -37,6 +40,16 @@ import { snapshotPage } from './views/snapshot';
 
 type C = Context<{ Bindings: Env }>;
 export const app = new Hono<{ Bindings: Env }>();
+
+// The consent form's POST redirects through GitHub/Google sign-in and ends at the MCP client's
+// registered redirect URI (validated by the OAuth provider), which can be any host, including
+// http://localhost:<port>. Chrome checks form-action on every hop of that chain, so the consent page
+// carries no form-action. Registered before secureHeaders so it runs after secureHeaders sets the CSP.
+app.use('/authorize', async (c, next) => {
+  await next();
+  const csp = c.res.headers.get('content-security-policy');
+  if (csp) c.res.headers.set('content-security-policy', csp.split(';').filter(d => !d.trim().startsWith('form-action')).join(';'));
+});
 
 app.use('*', secureHeaders({
   contentSecurityPolicy: {
@@ -48,7 +61,9 @@ app.use('*', secureHeaders({
     mediaSrc: ['https:'],
     connectSrc: ["'self'"],
     frameAncestors: ["'none'"],
-    formAction: ["'self'", 'https://pay.sepay.vn', 'https://pay-sandbox.sepay.vn'],
+    // Chrome applies form-action to redirects after a POST: the checkout form redirects to the
+    // PayPal or SePay payment page. The consent page drops form-action (see the /authorize middleware).
+    formAction: ["'self'", 'https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://pay.sepay.vn', 'https://pay-sandbox.sepay.vn'],
   },
   crossOriginEmbedderPolicy: false,
 }));
@@ -133,6 +148,11 @@ app.get('/s/:board/:date', async c => {
   return page(c, `${board} snapshot ${date} — bip.ad`, ctx => snapshotPage(ctx, v));
 });
 
+// Legal policies, linked from the footer and the checkout page.
+app.get('/terms', c => page(c, 'Terms of Service — bip.ad', termsPage, 200, 'The rules for listing products, all-pay bidding and referrals on bip.ad.'));
+app.get('/privacy', c => page(c, 'Privacy Policy — bip.ad', privacyPage, 200, 'What bip.ad collects, why, and who processes it.'));
+app.get('/refunds', c => page(c, 'Refund Policy — bip.ad', refundsPage, 200, 'When bip.ad refunds a bid and what a refund or chargeback changes.'));
+
 app.get('/r/:code', async c => {
   const code = c.req.param('code').toLowerCase();
   if (isReferralCodeShape(code)) {
@@ -196,6 +216,7 @@ app.post('/checkout/:id/pay', async c => {
     if (method !== 'paypal' && method !== 'sepay') return c.redirect(`/checkout/${id}?r=error`, 303);
     const provider = method as Provider;
     if (PROVIDER_CURRENCY[provider] !== intent.quote_currency) return c.redirect(`/checkout/${id}?r=error`, 303);
+    assertProviderEnabled(c.env, cfg, provider);
     const r = await beginCheckout(c.env.DB, cfg, user.id, id, provider);
     if (cfg.paymentMode === 'simulated') {
       const s = await simulatePayment(c.env.DB, cfg, id, provider);
@@ -210,19 +231,30 @@ app.post('/checkout/:id/pay', async c => {
   }
 });
 
+// PayPal sends the payer back here with ?token=<order id>. A GET has no side effects (prefetchers
+// and link previews follow it too): it only shows a page whose POST captures the order.
 app.get('/checkout/:id/paypal-return', async c => {
+  const id = c.req.param('id');
+  const intent = await getIntent(c.env.DB, id);
+  const token = c.req.query('token');
+  if (!intent || config(c.env).paymentMode === 'simulated' || !token || token !== intent.provider_order_id) return c.redirect(`/checkout/${id}?r=error`, 303);
+  if (intent.status !== 'awaiting_payment') return c.redirect(`/checkout/${id}`, 303);
+  return page(c, 'Complete payment — bip.ad', ctx => paypalReturnPage(ctx, id, token));
+});
+
+// The order token is the credential: only the payer gets it from PayPal, and capturing completes a
+// payment the payer already approved, so no session is required (it may have expired at PayPal).
+app.post('/checkout/:id/paypal-capture', async c => {
   const id = c.req.param('id');
   const cfg = config(c.env);
   const intent = await getIntent(c.env.DB, id);
-  const token = c.req.query('token');
-  if (!intent || cfg.paymentMode === 'simulated' || !token || token !== intent.provider_order_id) return c.redirect(`/checkout/${id}?r=error`, 303);
+  const form = await c.req.parseBody();
+  const token = typeof form.token === 'string' ? form.token : '';
+  if (!intent || cfg.paymentMode === 'simulated' || !token || !intent.provider_order_id || !safeEqual(token, intent.provider_order_id)) return c.redirect(`/checkout/${id}?r=error`, 303);
   // The redirect alone proves nothing (A06); capture server-to-server and settle from PayPal's answer.
   const cap = await captureOrder(c.env, token);
   if (cap.capture?.status === 'COMPLETED' && cap.capture.custom_id === id) {
     const r = await processEvent(c.env.DB, cfg, normalizePayPal({ id: `capture:${cap.capture.id}`, event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: cap.capture.id, status: 'COMPLETED', custom_id: id, amount: cap.capture.amount } }));
-    // A GET skips the post-request email hook, so schedule the receipt email here once settled.
-    const wait = waitUntilOf(c);
-    if (wait) scheduleEmailProcessing(c.env, wait);
     return c.redirect(`/checkout/${id}?r=${r.status === 'settled' || r.status === 'duplicate' || r.status === 'replayed' ? 'paid' : 'success'}`, 303);
   }
   return c.redirect(`/checkout/${id}?r=success`, 303);

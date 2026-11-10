@@ -17,6 +17,8 @@ export default defineConfig({
           GITHUB_CLIENT_ID: 'gh-test', GITHUB_CLIENT_SECRET: 'gh-secret',
           GOOGLE_CLIENT_ID: 'g-test', GOOGLE_CLIENT_SECRET: 'g-secret',
           REFERRAL_HOLD_DAYS: '30',
+          // Staging runs PayPal sandbox; tests default to simulated money and opt into sandbox per test.
+          PAYMENT_MODE: 'simulated',
           // Tests exercise the inline regex screen; the AI pipeline is tested with injected fakes.
           MODERATION_MODE: 'screen',
         },

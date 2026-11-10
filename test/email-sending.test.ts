@@ -167,7 +167,7 @@ describe('email transport helpers', () => {
     for (const bad of [undefined, '', 'bip.ad', 'Name <not-an-address>']) expect(parseFromAddress(bad)).toBeNull();
     expect(subjectPrefixFor('https://bip.ad')).toBe('');
     expect(subjectPrefixFor('https://www.bip.ad')).toBe('');
-    expect(subjectPrefixFor('https://bip-ad.digitop-vn.workers.dev')).toBe('[staging] ');
+    expect(subjectPrefixFor('https://bip-ad.digitop.workers.dev')).toBe('[staging] ');
     expect(subjectPrefixFor('http://bip.ad')).toBe('[staging] ');
   });
 });

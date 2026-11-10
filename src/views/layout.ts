@@ -1,6 +1,7 @@
 // Page shell: head, header, test-mode banner, footer, ribbon canvas and the deferred client script.
 import { ICON_SPRITE, icon } from './components';
 import { html, raw, type SafeHtml } from './html';
+import { LEGAL_PAGES } from './legal-page-shell';
 import type { LayoutContext } from './types';
 
 const SITE_NAME = 'bip.ad';
@@ -85,7 +86,7 @@ ${ICON_SPRITE}
 <canvas class="bg-canvas" data-bg aria-hidden="true"></canvas>
 <a class="skip" href="#main">Skip to content</a>
 <div class="page">
-${ctx.testMode ? html`<p class="test-banner" role="note"><strong>Test mode:</strong> payments are simulated, no real money moves.</p>` : ''}
+${ctx.testMode ? html`<p class="test-banner" role="note"><strong>Test mode:</strong> payments are simulated or run in a sandbox, no real money moves.</p>` : ''}
 <header class="site-header">
   <div class="wrap header-row">
     <a class="brand" href="/" aria-label="bip.ad home">${brand()}</a>
@@ -109,7 +110,7 @@ ${raw(body)}
       </div>
       <div><h2>Boards</h2><ul><li><a href="/daily">Daily</a></li><li><a href="/weekly">Weekly</a></li><li><a href="/monthly">Monthly</a></li></ul></div>
       <div><h2>Product</h2><ul><li><a href="/#why">Why 3:12</a></li><li><a href="/#agents">For agents</a></li><li><a href="/#money">Transparency</a></li></ul></div>
-      <div><h2>Policies</h2><ul><li><a href="/#rules">Ranking rules</a></li><li><a href="/#faq">Refund policy</a></li><li><a href="/#faq">Payments</a></li></ul></div>
+      <div><h2>Policies</h2><ul><li><a href="/#rules">Ranking rules</a></li>${LEGAL_PAGES.map((p) => html`<li><a href="${p.href}">${p.label}</a></li>`)}</ul></div>
     </div>
     <div class="footer-legal"><span>Rank on bip.ad is paid placement and is not a rating of quality.</span><span>© 2026 bip.ad</span></div>
   </div>
