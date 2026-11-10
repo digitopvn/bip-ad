@@ -41,6 +41,10 @@ export interface Env {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   SESSION_SECRET: string;
+  /** Encrypts payout beneficiary details at rest. Payout requests are refused while it is unset. */
+  PII_ENCRYPTION_KEY?: string;
+  /** The replaced PII_ENCRYPTION_KEY during a rotation; decrypt-only. */
+  PII_ENCRYPTION_KEY_PREVIOUS?: string;
   OPERATOR_TOKEN: string;
   PAYPAL_CLIENT_ID?: string;
   PAYPAL_CLIENT_SECRET?: string;

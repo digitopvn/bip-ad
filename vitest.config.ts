@@ -13,6 +13,7 @@ export default defineConfig({
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations(path.join(import.meta.dirname, 'migrations')),
           SESSION_SECRET: 'test-session-secret-0123456789abcdef',
+          PII_ENCRYPTION_KEY: 'test-pii-encryption-key-0123456789abcdef',
           OPERATOR_TOKEN: 'test-operator-token-0123456789abcdef0123',
           GITHUB_CLIENT_ID: 'gh-test', GITHUB_CLIENT_SECRET: 'gh-secret',
           GOOGLE_CLIENT_ID: 'g-test', GOOGLE_CLIENT_SECRET: 'g-secret',

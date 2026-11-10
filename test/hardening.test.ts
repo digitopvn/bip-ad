@@ -8,7 +8,7 @@ import { moderateProduct, publishPage, setBlocks, updateProduct } from '../src/d
 import { loadStandings } from '../src/domain/ranking';
 import { referralQualification } from '../src/domain/referrals';
 import { finalizeCohort, runLock } from '../src/domain/snapshot';
-import { requestPayout, vestCommissions } from '../src/domain/wallet';
+import { piiKeys, requestPayout, vestCommissions } from '../src/domain/wallet';
 import { newId } from '../src/lib/ids';
 import { cutoffForIctDate, DAY_MS, iso } from '../src/lib/time';
 import { reconcile } from '../src/mcp/operator-server';
@@ -170,8 +170,8 @@ describe('simulated money', () => {
     const com = await db().prepare('SELECT is_test, state FROM referral_commissions WHERE referrer_user_id = ?').bind(r).first();
     expect(com).toEqual({ is_test: 1, state: 'available' });
     const req = { currency: 'USD' as const, amountMinor: 500, payoutMethod: 'paypal' as const, beneficiaryReference: 'me@paypal.test', idempotencyKey: newId('p') };
-    await expect(requestPayout(db(), { ...cfg(), minPayout: { USD: 100, VND: 1000 } }, E.SESSION_SECRET, r, req)).rejects.toMatchObject({ code: 'payouts_disabled' });
-    await expect(requestPayout(db(), realCfg(), E.SESSION_SECRET, r, req)).rejects.toMatchObject({ code: 'insufficient_wallet' });
+    await expect(requestPayout(db(), { ...cfg(), minPayout: { USD: 100, VND: 1000 } }, piiKeys(E), r, req)).rejects.toMatchObject({ code: 'payouts_disabled' });
+    await expect(requestPayout(db(), realCfg(), piiKeys(E), r, req)).rejects.toMatchObject({ code: 'insufficient_wallet' });
   });
 
   it('an unknown PAYMENT_MODE fails closed instead of falling back to simulated', () => {

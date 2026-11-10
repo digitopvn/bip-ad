@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { applyWallet, beginCheckout, quote, refund, releaseWallet, settle } from '../src/domain/bidding';
 import { DomainError } from '../src/domain/errors';
 import { attributeSignup, getOrCreateReferralCode } from '../src/domain/referrals';
-import { failPayout, preparePayoutBatch, recordManualTransfer, requestPayout, vestCommissions, walletBalances } from '../src/domain/wallet';
+import { failPayout, piiKeys, preparePayoutBatch, recordManualTransfer, requestPayout, vestCommissions, walletBalances } from '../src/domain/wallet';
 import { reconcile } from '../src/mcp/operator-server';
 import { newId } from '../src/lib/ids';
 import { DAY_MS } from '../src/lib/time';
@@ -138,7 +138,7 @@ describe('commission wallet', () => {
     const lowMin = realCfg();
     const results = await Promise.allSettled([
       applyWallet(db(), r, intent.id, 500),
-      requestPayout(db(), lowMin, E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'me@paypal.test', idempotencyKey: newId('p') }),
+      requestPayout(db(), lowMin, piiKeys(E), r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'me@paypal.test', idempotencyKey: newId('p') }),
     ]);
     expect(results.filter(x => x.status === 'fulfilled')).toHaveLength(1);
     const rej = results.find(x => x.status === 'rejected') as PromiseRejectedResult;
@@ -157,13 +157,15 @@ describe('manual payouts (01-10 window)', () => {
   it('A31: request → batch → transfer recorded only with proof, exact amount, inside 01-10', async () => {
     const r = await fundedWallet();
     const lowMin = realCfg();
-    const req = await requestPayout(db(), lowMin, E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 400, payoutMethod: 'bank_transfer', beneficiaryReference: 'VCB 0123456789 NGUYEN A', idempotencyKey: newId('p') }) as { id: string };
+    const req = await requestPayout(db(), lowMin, piiKeys(E), r, { currency: 'USD', amountMinor: 400, payoutMethod: 'bank_transfer', beneficiaryReference: 'VCB 0123456789 NGUYEN A', idempotencyKey: newId('p') }) as { id: string };
     expect(await bal(r)).toMatchObject({ available_minor: 100, reserved_for_payout_minor: 400 });
     // Beneficiary details are encrypted at rest.
     const raw = await db().prepare('SELECT beneficiary_reference FROM payout_requests WHERE id = ?').bind(req.id).first<{ beneficiary_reference: string }>();
     expect(raw!.beneficiary_reference).not.toContain('0123456789');
+    expect(raw!.beneficiary_reference).toMatch(/^v2\.[0-9a-f]{12}\./);
+    expect(raw!.beneficiary_reference).toMatch(/^v2\.[0-9a-f]{12}\./);
 
-    const batch = await preparePayoutBatch(db(), E.SESSION_SECRET, 'operator:test', '2031-05', inWindow);
+    const batch = await preparePayoutBatch(db(), piiKeys(E), 'operator:test', '2031-05', inWindow);
     expect(batch.items.find(i => i.id === req.id)?.beneficiary_reference).toBe('VCB 0123456789 NGUYEN A');
     const t = { payoutRequestId: req.id, bankTransferReference: `FT${req.id}`, amountMinor: 400, transferredAt: new Date(inWindow - 3600_000).toISOString(), proofRef: 'vault://proofs/1' };
     await expect(recordManualTransfer(db(), 'operator:test', t, outWindow)).rejects.toThrow(/01-10/);
@@ -179,9 +181,9 @@ describe('manual payouts (01-10 window)', () => {
 
   it('failed transfer returns funds; minimum payout enforced', async () => {
     const r = await fundedWallet();
-    await expect(requestPayout(db(), { ...realCfg(), minPayout: cfg().minPayout }, E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'x@y.z', idempotencyKey: newId('p') })).rejects.toThrow(/Minimum payout/);
+    await expect(requestPayout(db(), { ...realCfg(), minPayout: cfg().minPayout }, piiKeys(E), r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'x@y.z', idempotencyKey: newId('p') })).rejects.toThrow(/Minimum payout/);
     const lowMin = realCfg();
-    const req = await requestPayout(db(), lowMin, E.SESSION_SECRET, r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'x@y.z', idempotencyKey: newId('p') }) as { id: string };
+    const req = await requestPayout(db(), lowMin, piiKeys(E), r, { currency: 'USD', amountMinor: 500, payoutMethod: 'paypal', beneficiaryReference: 'x@y.z', idempotencyKey: newId('p') }) as { id: string };
     await failPayout(db(), 'operator:test', req.id, 'BANK_REJECTED');
     await failPayout(db(), 'operator:test', req.id, 'again');
     expect(await bal(r)).toMatchObject({ available_minor: 500, reserved_for_payout_minor: 0 });
