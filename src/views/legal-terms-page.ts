@@ -39,7 +39,7 @@ export function termsPage(ctx: LayoutContext): string {
 
 <h2>6. Referrals, wallet and payouts</h2>
 <ul>
-  <li>Your referral link earns a commission of 5% of the external-cash part of the first confirmed bid of each account you refer. There is no lifetime commission. Self-referrals and accounts using your own email address do not qualify.</li>
+  <li>Your referral link earns a commission of 5% of the external-cash part of the first bid paid with external cash (PayPal or SePay) by each account you refer, once that bid is confirmed. Later bids by that account earn nothing, and bids paid entirely from a wallet earn no commission. There is no lifetime commission. Self-referrals and accounts using your own email address do not qualify.</li>
   <li>A commission is held for 30 days before it becomes available. If the underlying payment is refunded or charged back, the commission is clawed back, first from pending and then from available balance; any remainder is recorded as an amount you owe.</li>
   <li>Available commission can be spent on bids from your wallet. Wallet funds cannot be transferred to other users.</li>
   <li>Payouts are made manually by bank transfer on days 01–10 of each month (ICT), above a minimum amount. Before paying, the operator may verify the beneficiary, the amount and any tax or identity requirements, and may hold a payout while it checks for fraud. Commissions from test or simulated payments are never payable.</li>

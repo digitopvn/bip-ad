@@ -21,7 +21,7 @@ export function welcomeDoc(d: Extract<EmailMessageData, { kind: 'welcome' }>, ct
           ['List your product', 'Ask your agent to create the product, build its page from widgets (hero, gallery, pricing, FAQ and more) and submit it. Every submission is reviewed; low-risk ones publish automatically.'],
           ['Bid for a seat', 'Your agent quotes a bid and gives you a checkout link to pay. Ties are broken by successful referrals, then valid unique clicks, then valid unique views.'],
           ['Lock at 03:12 ICT', 'Standings freeze every night. We email you where your products landed on each board.'],
-          ['Share your referral link', 'Earn 5% commission on the bids of builders you refer. Spend it on bids, or request a payout on days 01 to 10 of each month.'],
+          ['Share your referral link', 'Earn 5% commission on the first bid each builder you refer pays with PayPal or SePay. Spend it on bids, or request a payout on days 01 to 10 of each month.'],
         ],
       },
       { t: 'p', text: 'Your MCP server URL:' },

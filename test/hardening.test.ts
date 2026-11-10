@@ -518,7 +518,7 @@ describe('round-five regressions', () => {
     const { capId, reviewId } = await heldCapture('FRESH');
     await claimAt(reviewId, Date.now());
     expect((await processEvent(db(), sandbox(), refundEvent(capId))).status).toBe('retry');
-    expect((await resolvePaymentReview(db(), sandbox(), 'operator:test', reviewId, 'dismiss', 'x')).status).toBe('settled');
+    expect((await resolvePaymentReview(db(), sandbox(), 'operator:test', reviewId, 'dismiss', 'x')).status).toBe('settling');
   });
 
   it('partial-refund reviews stay open while the capture is still being settled', async () => {

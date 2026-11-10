@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [
@@ -26,5 +26,6 @@ export default defineConfig({
       },
     })),
   ],
-  test: { setupFiles: ['./test/apply-migrations.ts'] },
+  // Agent worktrees under .claude/ hold full repo copies; never collect their tests.
+  test: { setupFiles: ['./test/apply-migrations.ts'], exclude: [...configDefaults.exclude, '.claude/**'] },
 });
