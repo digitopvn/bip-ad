@@ -50,6 +50,11 @@
     "ADS_MODE": "dry_run",
     "ADS_LIVE_APPROVED": "false",
     // Social posting is mocked until the owner flips SOCIAL_MODE=live (needs the ZERNIO_API_KEY secret and ZERNIO_ACCOUNT_* ids).
+    // Zernio account ids of the BIPAD profile (@bip_ads, buildinpublic.ad, @bipads, @bip.ad); not secrets.
+    "ZERNIO_ACCOUNT_X": "6af2d5861f41ccc469d0b4a0",
+    "ZERNIO_ACCOUNT_FACEBOOK": "6af2d5416c38cff96682ebc9",
+    "ZERNIO_ACCOUNT_YOUTUBE": "6af2d5688baf2fab77b0bcff",
+    "ZERNIO_ACCOUNT_TIKTOK": "6af2cfcd04381c05db923f8d",
     "SOCIAL_MODE": "mock"
   },
   "observability": { "enabled": true },
@@ -93,8 +98,8 @@
         "MODERATION_LLM_MODEL": "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
         "MODERATION_APPROVE_MAX_RISK": "0.3",
         "PAYPAL_API_BASE": "https://api-m.paypal.com",
-        "SEPAY_API_BASE": "https://pgapi-sandbox.sepay.vn",
-        "SEPAY_CHECKOUT_URL": "https://pay-sandbox.sepay.vn/v1/checkout/init",
+        "SEPAY_API_BASE": "https://pgapi.sepay.vn",
+        "SEPAY_CHECKOUT_URL": "https://pay.sepay.vn/v1/checkout/init",
         "EMAIL_FROM": "bip.ad <hello@bip.ad>",
         "EMAIL_REPLY_TO": "hello@bip.ad",
         "OPERATOR_ALERT_EMAIL": "hello@bip.ad",
@@ -102,6 +107,11 @@
         "ADS_MODE": "dry_run",
         "ADS_LIVE_APPROVED": "false",
         // Public posting stays off until the owner flips it.
+        // Same BIPAD Zernio accounts as staging.
+        "ZERNIO_ACCOUNT_X": "6af2d5861f41ccc469d0b4a0",
+        "ZERNIO_ACCOUNT_FACEBOOK": "6af2d5416c38cff96682ebc9",
+        "ZERNIO_ACCOUNT_YOUTUBE": "6af2d5688baf2fab77b0bcff",
+        "ZERNIO_ACCOUNT_TIKTOK": "6af2cfcd04381c05db923f8d",
         "SOCIAL_MODE": "mock"
       }
     }
