@@ -120,11 +120,18 @@ describe('MCP endpoints', () => {
 });
 
 describe('content security policy', () => {
-  it('lets forms redirect to the sign-in and payment hosts they post through', async () => {
+  it('lets the checkout form redirect to the payment hosts', async () => {
     const r = await SELF.fetch(`${BASE}/`, { headers: UA });
     const formAction = (r.headers.get('content-security-policy') ?? '').split(';').map(d => d.trim()).find(d => d.startsWith('form-action')) ?? '';
-    for (const host of ['https://github.com', 'https://accounts.google.com', 'https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://pay.sepay.vn']) {
+    for (const host of ['https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://pay.sepay.vn']) {
       expect(formAction, host).toContain(host);
     }
+  });
+
+  it('drops form-action on the consent page, whose redirect ends at the client', async () => {
+    const r = await SELF.fetch(`${BASE}/authorize?response_type=code`, { headers: UA });
+    const csp = r.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).not.toContain('form-action');
   });
 });
