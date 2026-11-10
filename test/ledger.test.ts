@@ -50,6 +50,30 @@ describe('revenue split and referral commission', () => {
     expect(await ledgerBalancedEverywhere()).toBe(true);
   });
 
+  it('commission is earned only on the referred buyer\'s first external-cash bid; wallet-funded bids earn none', async () => {
+    const { r, b } = await referredPair();
+    // B earns its own commission by referring C, so B can pay a bid from its wallet.
+    const c = await makeUser('Buyer of B');
+    expect(await attributeSignup(db(), cfg(), c, await getOrCreateReferralCode(db(), b), Date.now() - 1000)).toBe('attributed');
+    await bid(c, await makeProduct(c, `Fund ${newId('f')}`), 'monthly', 10000, Date.now() - 40 * DAY_MS);
+    await vestCommissions(db(), Date.now());
+    expect(await bal(b)).toMatchObject({ available_minor: 500 });
+    const commissionOf = async (intentId: string) =>
+      (await db().prepare('SELECT commission_minor FROM bid_contributions WHERE bid_intent_id = ?').bind(intentId).first<{ commission_minor: number }>())!.commission_minor;
+    const p = await makeProduct(b, 'First Cash Only');
+    const t = Date.now();
+    // A wallet-only bid is not an external-cash bid: no commission, and the referral is not used up.
+    expect(await commissionOf(await bid(b, p, 'daily', 500, t, 'paypal', 500))).toBe(0);
+    expect((await bal(r))?.pending_minor ?? 0).toBe(0);
+    // The first external-cash bid earns 5%; the second earns nothing.
+    expect(await commissionOf(await bid(b, p, 'daily', 10000, t + 1000))).toBe(500);
+    expect(await commissionOf(await bid(b, p, 'daily', 10000, t + 2000))).toBe(0);
+    const n = await db().prepare('SELECT COUNT(*) AS n FROM referral_commissions WHERE referrer_user_id = ?').bind(r).first<{ n: number }>();
+    expect(n!.n).toBe(1);
+    expect(await bal(r)).toMatchObject({ pending_minor: 500 });
+    expect(await ledgerBalancedEverywhere()).toBe(true);
+  });
+
   it('A26: self-referral is rejected at attribution; no commission', async () => {
     const r = await makeUser('Self', 'same@example.test');
     const alt = await makeUser('Alt', 'SAME@example.test');

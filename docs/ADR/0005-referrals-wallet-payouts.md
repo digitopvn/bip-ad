@@ -1,6 +1,6 @@
 # ADR-0005: Referral policy ref-v1, commission wallet and manual payouts
 
-Status: MVP defaults. The owner must approve them before go-live.
+Status: MVP defaults. The first-external-cash-bid commission rule below is owner-approved (2026-11-10); the other defaults still need owner approval before go-live.
 
 ## Attribution
 - `/r/{code}` sets a signed cookie that lasts 30 days (`REFERRAL_ATTRIBUTION_DAYS`).
@@ -14,7 +14,7 @@ Status: MVP defaults. The owner must approve them before go-live.
 - It counts once per referred account, however many bids that account places.
 
 ## Commission
-- The commission is 5% of the external-cash part of that first bid only. There is no lifetime commission.
+- The commission is 5% of the external-cash part of that first bid only (owner decision, 2026-11-10). There is no lifetime commission: later bids by the same account earn none, and a bid paid entirely from the wallet earns none and does not use up the referral. Enforced by `referralQualification` in [`referrals.ts`](../../src/domain/referrals.ts).
 - It stays `pending` until the hold period ends, then becomes `available`.
 - A refund or chargeback claws it back: first from pending, then from available, and any remainder is recorded as a receivable.
 - Vesting and clawback guard each other, so a commission clawed back while it vests never becomes spendable.
