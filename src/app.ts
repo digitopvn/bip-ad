@@ -33,6 +33,8 @@ import { homePage } from './views/home';
 import { privacyPage } from './views/legal-privacy-page';
 import { refundsPage } from './views/legal-refunds-page';
 import { termsPage } from './views/legal-terms-page';
+import { transparencyPage } from './views/transparency';
+import { buildTransparencyView } from './ads/ads-transparency';
 import { escapeHtml } from './views/html';
 import { loginPage, safeNext } from './views/login';
 import { productPage } from './views/product';
@@ -152,6 +154,11 @@ app.get('/s/:board/:date', async c => {
 app.get('/terms', c => page(c, 'Terms of Service — bip.ad', termsPage, 200, 'The rules for listing products, all-pay bidding and referrals on bip.ad.'));
 app.get('/privacy', c => page(c, 'Privacy Policy — bip.ad', privacyPage, 200, 'What bip.ad collects, why, and who processes it.'));
 app.get('/refunds', c => page(c, 'Refund Policy — bip.ad', refundsPage, 200, 'When bip.ad refunds a bid and what a refund or chargeback changes.'));
+
+app.get('/transparency', async c => {
+  const v = await buildTransparencyView(c.env.DB, config(c.env));
+  return page(c, 'Transparency — bip.ad', ctx => transparencyPage(ctx, v), 200, 'Per-board ads funds, flights, hard caps and spend, with the time and source of every figure.');
+});
 
 app.get('/r/:code', async c => {
   const code = c.req.param('code').toLowerCase();

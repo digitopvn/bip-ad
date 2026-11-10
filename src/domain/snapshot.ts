@@ -120,9 +120,9 @@ async function tryFinalizeCohort(db: D1Database, board: Board, cutoffMs: number,
           { account: acct.adsPending(board), currency, amount: ads },
           { account: acct.adsFund(board), currency, amount: -ads },
         ] }, now),
-        // Phase 4 (ad execution) is out of scope: the flight is planned with hard caps; the adapter is a mock.
+        // The flight carries the hard caps; the hourly ads cycle (src/ads/) plans and executes it within them.
         db.prepare(`INSERT INTO ad_flights (id, cohort_id, board, currency, start_at, end_at, spend_cap_minor, daily_cap_minor, state, adapter_status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', 'mocked', ?)`)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', 'not_sent', ?)`)
           .bind(newId('fli'), cohortId, board, currency, cutoff, iso(cutoffMs + days * DAY_MS), ads, Math.floor(ads / days), now),
         db.prepare(`UPDATE revenue_cohorts SET status = 'funded' WHERE id = ?`).bind(cohortId),
       );
@@ -139,7 +139,10 @@ async function tryFinalizeCohort(db: D1Database, board: Board, cutoffMs: number,
   }
 }
 
-/** Video/social adapters are mocks in this MVP: they record a deterministic composition and an explicit "mocked" status. */
+/**
+ * The video adapter is a mock: it records a deterministic composition and an explicit "mocked" status. The
+ * social records start as "mocked" too; with SOCIAL_MODE=live the operator publishes them (src/social/).
+ */
 export async function produceMockMedia(db: D1Database, snapshotId: string, origin: string, nowMs = Date.now()) {
   // The asset and the publications commit in one batch, so an existing asset means this step is done (one query on a resumed run).
   const snap = await db.prepare(`SELECT board, cutoff_at, EXISTS (SELECT 1 FROM content_assets a WHERE a.snapshot_id = s.id AND a.type = 'video_composition') AS done

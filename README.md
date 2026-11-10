@@ -6,9 +6,17 @@
 - When bids are equal, including zero, ties are broken by the owner's successful referrals, then valid unique clicks, then valid unique views.
 - 80% of each board's bid revenue funds that board's ads. Referrers earn a 5% commission. Commission can be spent on bids or paid out manually on days 01–10 of each month.
 
-> Status: MVP (Phases 1–3 of [the decision brief](docs/BIP_AD_Decision_Brief_v1.1.md)). Staging takes **PayPal sandbox** payments and production takes **live PayPal** payments (`PAYMENT_MODE=live` with `LIVE_PAYMENTS=true`, approved by the owner on 2026-11-09). A provider is offered only once its secrets are set, so SePay stays unavailable until it is configured. Video, social and ads adapters are mocks.
+> Status: MVP (Phases 1–5 of [the decision brief](docs/BIP_AD_Decision_Brief_v1.1.md)). Staging takes **PayPal sandbox** payments and production takes **live PayPal** payments (`PAYMENT_MODE=live` with `LIVE_PAYMENTS=true`, approved by the owner on 2026-11-09). A provider is offered only once its secrets are set, so SePay stays unavailable until it is configured.
+>
+> Social posting and ads are real Zernio adapters behind owner-controlled flags ([ADR-0007](docs/ADR/0007-media-and-ads-mocks.md)):
+> - `SOCIAL_MODE=mock`: nothing is posted.
+> - `ADS_MODE=dry_run`: ad requests are recorded and never sent, and no money is spent. `live` also needs `ADS_LIVE_APPROVED=true`.
+>
+> The video adapter is a mock.
 
 Policies are public at `/terms`, `/privacy` and `/refunds` (linked from the footer and checkout; owner legal review pending before live payments).
+
+`/transparency` shows the ads fund of each board, every flight with its spend and daily caps, and money planned, committed and spent. Every figure carries its `as_of_at` time and source, and the page is labelled "dry run" while ads are dry. The footer links the bip.ad accounts on [X](https://x.com/bip_ads), [Facebook](https://www.facebook.com/buildinpublic.ad/), [YouTube](https://www.youtube.com/@bipads) and [TikTok](https://www.tiktok.com/@bip.ad).
 
 ## Stack
 Cloudflare Workers, Hono, D1 (data and double-entry ledger), KV (OAuth and sessions), Cron Triggers, `@cloudflare/workers-oauth-provider`, and `@modelcontextprotocol/sdk` (Streamable HTTP). Tests run on Vitest with `@cloudflare/vitest-pool-workers`.
@@ -27,7 +35,13 @@ Add the MCP server `https://<your-host>/mcp` to Claude, ChatGPT or any MCP clien
 | `payouts.request` / `payouts.status` | Request a manual payout of available commission. |
 | `analytics.product` | Valid views, clicks and standings for a product. |
 
-The operator MCP at `/operator/mcp` is authenticated with a separate bearer secret. It covers moderation (`products.pending` with AI scores, `products.moderate`, `moderation.rescore`), `emails.list`, `boards.freeze`, `locks.run`, cohorts, payment reviews (`payments.reviews`, `payments.resolve_review`), payout batches, recording manual transfers, `finance.reconcile`, and the mock media and ads tools.
+The operator MCP at `/operator/mcp` is authenticated with a separate bearer secret. It covers moderation (`products.pending` with AI scores, `products.moderate`, `moderation.rescore`), `emails.list`, `boards.freeze`, `locks.run`, cohorts, payment reviews (`payments.reviews`, `payments.resolve_review`), payout batches, recording manual transfers, and `finance.reconcile`. It also covers:
+- media and social: `videos.render` (mock) and `social.publish`;
+- ads: `ads.plan`, `ads.execute`, `ads.pause`, `ads.resume`, `ads.kill_switch` and `ads.report`;
+- adapter calls: `adapters.requests`, `adapters.dead_letters` and `adapters.retry`;
+- `operator.health`, which reports adapter modes, dead letters and alert conditions.
+
+Operations are covered in [`docs/runbooks/`](docs/runbooks): the go-live checklist, backup and restore, monitoring and SLOs, failure runbooks and incident response.
 
 ## Email
 Users get English transactional email through Cloudflare Email Service ([ADR-0009](docs/ADR/0009-transactional-email.md)): a welcome, product decisions, bid receipts and reversals, the nightly 03:12 lock results, available commissions and paid payouts. The emails are projected from the domain events in `outbox_events` into `email_outbox`. They are sent right after the change, and a dedicated cron sends anything left over and retries failures every 15 minutes. Users switch the Products, Boards and Referrals groups off in `/account` or with the one-click unsubscribe link. Receipts, reversals, payouts and the welcome are always sent. The operator inspects delivery with `emails.list` on `/operator/mcp`.
@@ -82,7 +96,7 @@ Architecture and money rules are recorded in [`docs/ADR/`](docs/ADR):
 - [ADR-0004](docs/ADR/0004-payments.md): payments
 - [ADR-0005](docs/ADR/0005-referrals-wallet-payouts.md): referrals, wallet and payouts
 - [ADR-0006](docs/ADR/0006-mcp-auth-and-operator.md): MCP auth and the operator boundary
-- [ADR-0007](docs/ADR/0007-media-and-ads-mocks.md): media and ads mocks
+- [ADR-0007](docs/ADR/0007-media-and-ads-mocks.md): video, social and ads adapters behind owner-controlled flags
 - [ADR-0008](docs/ADR/0008-ai-moderation.md): AI moderation of submissions and edits
 - [ADR-0009](docs/ADR/0009-transactional-email.md): transactional email through Cloudflare Email Service
 

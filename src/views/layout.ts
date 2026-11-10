@@ -8,6 +8,14 @@ const SITE_NAME = 'bip.ad';
 const DEFAULT_DESCRIPTION =
   'Builders list products through their AI agents and bid openly for a seat. Every night at 3:12 ICT the board locks and the Top 10 becomes a video on X, Facebook and YouTube.';
 
+/** bip.ad's own social accounts, linked from every footer (rel="me" verifies the profiles belong to this site). */
+export const SOCIAL_PROFILES = [
+  { href: 'https://x.com/bip_ads', label: 'X', name: 'bip.ad on X' },
+  { href: 'https://www.facebook.com/buildinpublic.ad/', label: 'Facebook', name: 'bip.ad on Facebook' },
+  { href: 'https://www.youtube.com/@bipads', label: 'YouTube', name: 'bip.ad on YouTube' },
+  { href: 'https://www.tiktok.com/@bip.ad', label: 'TikTok', name: 'bip.ad on TikTok' },
+] as const;
+
 interface NavLink {
   href: string;
   label: string;
@@ -107,9 +115,12 @@ ${raw(body)}
       <div class="footer-brand">
         <a class="brand" href="/" aria-label="bip.ad home">${brand()}</a>
         <p>Build in public. Bid to win. A launch board where rank is bought openly and recorded every night at 3:12 ICT.</p>
+        <ul class="footer-social" aria-label="bip.ad on social media">${SOCIAL_PROFILES.map(
+          (p) => html`<li><a href="${p.href}" rel="me noopener" aria-label="${p.name}">${p.label}</a></li>`,
+        )}</ul>
       </div>
       <div><h2>Boards</h2><ul><li><a href="/daily">Daily</a></li><li><a href="/weekly">Weekly</a></li><li><a href="/monthly">Monthly</a></li></ul></div>
-      <div><h2>Product</h2><ul><li><a href="/#why">Why 3:12</a></li><li><a href="/#agents">For agents</a></li><li><a href="/#money">Transparency</a></li></ul></div>
+      <div><h2>Product</h2><ul><li><a href="/#why">Why 3:12</a></li><li><a href="/#agents">For agents</a></li><li><a href="/transparency">Transparency</a></li></ul></div>
       <div><h2>Policies</h2><ul><li><a href="/#rules">Ranking rules</a></li>${LEGAL_PAGES.map((p) => html`<li><a href="${p.href}">${p.label}</a></li>`)}</ul></div>
     </div>
     <div class="footer-legal"><span>Rank on bip.ad is paid placement and is not a rating of quality.</span><span>© 2026 bip.ad</span></div>
