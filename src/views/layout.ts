@@ -86,7 +86,7 @@ ${ICON_SPRITE}
 <canvas class="bg-canvas" data-bg aria-hidden="true"></canvas>
 <a class="skip" href="#main">Skip to content</a>
 <div class="page">
-${ctx.testMode ? html`<p class="test-banner" role="note"><strong>Test mode:</strong> payments are simulated, no real money moves.</p>` : ''}
+${ctx.testMode ? html`<p class="test-banner" role="note"><strong>Test mode:</strong> payments are simulated or run in a sandbox, no real money moves.</p>` : ''}
 <header class="site-header">
   <div class="wrap header-row">
     <a class="brand" href="/" aria-label="bip.ad home">${brand()}</a>
