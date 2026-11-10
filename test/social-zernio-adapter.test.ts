@@ -73,7 +73,7 @@ describe('social publishing', () => {
 
   it('without a video, YouTube and TikTok are blocked instead of posted; unconfigured accounts are skipped', async () => {
     const snap = await lockedSnapshot('2034-01-03');
-    const env = envWith({ SOCIAL_MODE: 'live', ZERNIO_API_KEY: 'sk_test_social', ZERNIO_ACCOUNT_X: ACCOUNTS.x, ZERNIO_ACCOUNT_YOUTUBE: ACCOUNTS.youtube, ZERNIO_ACCOUNT_TIKTOK: ACCOUNTS.tiktok });
+    const env = envWith({ SOCIAL_MODE: 'live', ZERNIO_API_KEY: 'sk_test_social', ZERNIO_ACCOUNT_X: ACCOUNTS.x, ZERNIO_ACCOUNT_FACEBOOK: undefined, ZERNIO_ACCOUNT_YOUTUBE: ACCOUNTS.youtube, ZERNIO_ACCOUNT_TIKTOK: ACCOUNTS.tiktok });
     const { fetcher, calls } = fakeFetch({ status: 201, body: { post: { _id: 'p2', platforms: [] } } });
     await publishSnapshot(env, cfgOf(env), snap, { actor, fetcher });
     expect(calls).toHaveLength(1);
