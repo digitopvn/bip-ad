@@ -41,6 +41,16 @@ import { snapshotPage } from './views/snapshot';
 type C = Context<{ Bindings: Env }>;
 export const app = new Hono<{ Bindings: Env }>();
 
+// The consent form's POST redirects through GitHub/Google sign-in and ends at the MCP client's
+// registered redirect URI (validated by the OAuth provider), which can be any host, including
+// http://localhost:<port>. Chrome checks form-action on every hop of that chain, so the consent page
+// carries no form-action. Registered before secureHeaders so it runs after secureHeaders sets the CSP.
+app.use('/authorize', async (c, next) => {
+  await next();
+  const csp = c.res.headers.get('content-security-policy');
+  if (csp) c.res.headers.set('content-security-policy', csp.split(';').filter(d => !d.trim().startsWith('form-action')).join(';'));
+});
+
 app.use('*', secureHeaders({
   contentSecurityPolicy: {
     defaultSrc: ["'self'"],
@@ -51,12 +61,9 @@ app.use('*', secureHeaders({
     mediaSrc: ['https:'],
     connectSrc: ["'self'"],
     frameAncestors: ["'none'"],
-    // Chrome applies form-action to redirects after a POST: the consent form redirects to GitHub/Google
-    // sign-in, and the checkout form to the PayPal or SePay payment page.
-    formAction: [
-      "'self'", 'https://github.com', 'https://accounts.google.com',
-      'https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://pay.sepay.vn', 'https://pay-sandbox.sepay.vn',
-    ],
+    // Chrome applies form-action to redirects after a POST: the checkout form redirects to the
+    // PayPal or SePay payment page. The consent page drops form-action (see the /authorize middleware).
+    formAction: ["'self'", 'https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://pay.sepay.vn', 'https://pay-sandbox.sepay.vn'],
   },
   crossOriginEmbedderPolicy: false,
 }));

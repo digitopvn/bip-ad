@@ -64,4 +64,4 @@ Wallet funds can be applied only to a fresh quote, before checkout starts, so th
 ## Late captures
 A capture that arrives after the quote expired still settles at the locked price, because the money has arrived.
 
-The CSP `form-action` lists every host a form POST redirects to (GitHub and Google sign-in from MCP consent, PayPal and SePay from checkout). Chrome blocks a post-redirect to an unlisted host without any error page, which is how MCP sign-in failed on staging.
+Chrome checks CSP `form-action` on every redirect after a form POST and blocks an unlisted host without any error page. The checkout form redirects to PayPal or SePay, so `form-action` lists those hosts. The MCP consent page (`/authorize`) sends no `form-action`, because its chain ends at the client's registered redirect URI, which can be any host including `http://localhost:<port>`; that is how MCP sign-in failed on staging.
