@@ -12,7 +12,7 @@ Status: accepted for the MVP
 Each contribution is split when it settles:
 
 - **Ads:** floor(80% × gross).
-- **Commission:** floor(5% × external cash). It applies only when the bid is the buyer's first external-cash bid and that bid qualifies a referral.
+- **Commission:** floor(5% × external cash). It applies only when the bid is the buyer's first external-cash bid and that bid qualifies a referral (owner decision, 2026-11-10; see ADR-0005).
 - **Platform:** the remainder. That is 20% without a referral and about 15% with one.
 
 The part of a bid paid from the commission wallet earns no commission, which prevents self-reward loops.

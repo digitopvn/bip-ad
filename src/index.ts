@@ -1,14 +1,19 @@
 import OAuthProvider from '@cloudflare/workers-oauth-provider';
 import { app } from './app';
 import { expireIntents } from './domain/bidding';
+import { meteredDb, QueryBudget } from './email/d1-query-meter';
 import { CRON_RUN, processEmails, scheduleEmailProcessing } from './email/process-emails';
 import { config } from './domain/config';
-import { runDueLocks } from './domain/snapshot';
+import { refreshMetricRollup } from './domain/ranking';
+import { type LockRun, runDueLocks } from './domain/snapshot';
 import { vestCommissions } from './domain/wallet';
 import type { Env, McpProps } from './env';
 import { serveMcp } from './mcp/common';
 import { userMcpServer } from './mcp/user-server';
 import { sweepPendingModeration } from './moderation/ai-moderation-pipeline';
+import { runAdsCycle } from './ads/ads-hourly-cycle';
+import { reconcile } from './mcp/operator-server';
+import { sendOperatorAlerts } from './monitoring/operator-alerts';
 
 /** /mcp: reached only with a valid OAuth access token; the provider puts the grant props on ctx.props. */
 const mcpApi = {
@@ -60,20 +65,58 @@ async function isolated(name: string, fn: () => Promise<unknown>) {
 }
 
 /**
- * The 03:12 ICT lock (and catch-up of any missed cutoff) runs first, then housekeeping in pages.
- * A lock failure is retried by the hourly trigger; housekeeping failures never block the lock.
+ * D1 queries one lock/housekeeping cron invocation may use: the Workers Free limit is 50 per
+ * invocation (a db.batch() counts as one), minus headroom for estimates that run short.
  */
-export async function scheduledJob(env: Env, nowMs = Date.now()) {
-  let locks: Awaited<ReturnType<typeof runDueLocks>> = [];
+export const SCHEDULED_QUERY_CAP = 45;
+
+/**
+ * Worst-case queries of the housekeeping steps: fixed reads/writes plus a cost per item, used to
+ * size each step's page from the queries left. The moderation job cost is a conservative estimate
+ * (claim, both stages, scores, the decision batch and the job status writes).
+ */
+const HOUSEKEEPING_QUERIES = {
+  expire: { fixed: 1, perItem: 3, max: 100 },
+  vest: { fixed: 2, perItem: 1, max: 100 },
+  moderation: { fixed: 3, perItem: 15, max: 10 },
+} as const;
+
+/** Items that fit in what is left of the budget, capped at the step's page size. */
+const pageFor = (budget: QueryBudget, step: keyof typeof HOUSEKEEPING_QUERIES) => {
+  const q = HOUSEKEEPING_QUERIES[step];
+  return Math.max(0, Math.min(q.max, Math.floor((budget.remaining - q.fixed) / q.perItem)));
+};
+
+/**
+ * One lock/housekeeping cron invocation, within `cap` D1 queries. In priority order:
+ * 1. the 03:12 ICT lock and catch-up of missed cutoffs, step by step while the budget allows;
+ * 2. the hourly ranking metric rollup the live boards read;
+ * 3. the ads and monitoring cycle (reconcile guard and pause, flight planning and dry-run execution,
+ *    hourly metrics, operator alert detection), each step only when it fits;
+ * 4. housekeeping pages sized to what is left (quote expiry, commission vesting, AI moderation sweep).
+ * Every step is idempotent and works oldest-first, so whatever does not fit resumes on the next
+ * hourly run. A lock failure is retried by the hourly trigger; housekeeping failures never block the lock.
+ */
+export async function scheduledJob(env: Env, nowMs = Date.now(), cap = SCHEDULED_QUERY_CAP) {
+  const budget = new QueryBudget(cap);
+  const db = meteredDb(env.DB, budget);
+  const cfg = config(env);
+  let locks: LockRun[] = [];
   try {
-    locks = await runDueLocks(env.DB, config(env).origin, nowMs);
+    locks = await runDueLocks(db, cfg.origin, nowMs, undefined, budget);
   } catch (e) {
     console.error('lock run failed', e);
   }
-  await isolated('vestCommissions', () => vestCommissions(env.DB, nowMs));
-  await isolated('expireIntents', () => expireIntents(env.DB, nowMs));
+  if (budget.allows(2)) await isolated('refreshMetricRollup', () => refreshMetricRollup(db, nowMs));
+  await isolated('adsCycle', () => runAdsCycle({ ...env, DB: db }, cfg, reconcile, nowMs, budget));
+  const expire = pageFor(budget, 'expire');
+  if (expire) await isolated('expireIntents', () => expireIntents(db, nowMs, undefined, expire));
+  const vest = pageFor(budget, 'vest');
+  if (vest) await isolated('vestCommissions', () => vestCommissions(db, nowMs, vest));
   // Fallback for AI moderation jobs that failed or never ran inline (retries, stale runs, missing credentials at the time).
-  await isolated('sweepPendingModeration', () => sweepPendingModeration(env, config(env), nowMs));
+  const moderation = pageFor(budget, 'moderation');
+  if (moderation) await isolated('sweepPendingModeration', () => sweepPendingModeration({ ...env, DB: db }, cfg, nowMs, moderation));
+  console.log('scheduled queries', budget.used);
   return locks;
 }
 
@@ -85,10 +128,12 @@ export async function runScheduled(cron: string, env: Env) {
   if (cron === EMAIL_CRON) {
     const r = await processEmails(env, Date.now(), undefined, CRON_RUN);
     console.log('email run', JSON.stringify({ projection: r.projection, sending: r.sending, queries: r.queriesUsed }));
+    // Operator alerts queued by the hourly cycle go out with the rest of the email.
+    await isolated('sendOperatorAlerts', () => sendOperatorAlerts(env, config(env).origin));
     return r;
   }
   const locks = await scheduledJob(env);
-  console.log('lock run', JSON.stringify(locks.map(x => ({ cutoff: x.cutoffAt, skipped: x.skipped }))));
+  console.log('lock run', JSON.stringify(locks.map(x => ({ cutoff: x.cutoffAt, skipped: x.skipped, complete: x.complete }))));
   return locks;
 }
 

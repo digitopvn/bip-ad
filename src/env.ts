@@ -41,6 +41,10 @@ export interface Env {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   SESSION_SECRET: string;
+  /** Encrypts payout beneficiary details at rest. Payout requests are refused while it is unset. */
+  PII_ENCRYPTION_KEY?: string;
+  /** The replaced PII_ENCRYPTION_KEY during a rotation; decrypt-only. */
+  PII_ENCRYPTION_KEY_PREVIOUS?: string;
   OPERATOR_TOKEN: string;
   PAYPAL_CLIENT_ID?: string;
   PAYPAL_CLIENT_SECRET?: string;
@@ -59,6 +63,28 @@ export interface Env {
   EMAIL_FROM?: string;
   /** Optional Reply-To address for transactional email. */
   EMAIL_REPLY_TO?: string;
+  /** Recipient of operator alert emails (reconcile unbalanced, email backlog, missed lock, dead letters). */
+  OPERATOR_ALERT_EMAIL?: string;
+
+  /** dry_run (default): ad requests are recorded, never sent. live: sent to Zernio Ads, only with ADS_LIVE_APPROVED=true. */
+  ADS_MODE?: string;
+  /** Must be exactly "true" before ADS_MODE=live is honoured (owner approval of paid campaigns). */
+  ADS_LIVE_APPROVED?: string;
+  /** "true" stops all ad planning and execution and pauses running flights, whatever the operator switch says. */
+  ADS_KILL_SWITCH?: string;
+  /** JSON array of ad channels: [{"channel":"meta","accountId":"...","adAccountId":"act_...","minDailyMinor":100}]. */
+  ZERNIO_ADS_ACCOUNTS?: string;
+  /** mock (default): publications are recorded as mocked, nothing is posted. live: posts through Zernio. */
+  SOCIAL_MODE?: string;
+  /** Zernio API key (secret, "sk_..."). Needed by SOCIAL_MODE=live and ADS_MODE=live. */
+  ZERNIO_API_KEY?: string;
+  /** Zernio REST base, default https://zernio.com/api/v1. */
+  ZERNIO_API_BASE?: string;
+  /** Zernio account ids (the account `_id` from GET /v1/accounts) of each connected social account. */
+  ZERNIO_ACCOUNT_X?: string;
+  ZERNIO_ACCOUNT_FACEBOOK?: string;
+  ZERNIO_ACCOUNT_YOUTUBE?: string;
+  ZERNIO_ACCOUNT_TIKTOK?: string;
 }
 
 /** Props stored in the MCP access token grant. */

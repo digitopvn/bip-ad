@@ -129,6 +129,13 @@ export interface AccountView {
   mcpUrl: string;
 }
 
+/** Checkout as seen by anyone but the intent's signed-in owner. */
+export interface CheckoutLockedView {
+  intentId: string;
+  productName: string;
+  signedIn: boolean;
+}
+
 export interface CheckoutView {
   intentId: string;
   status: string;

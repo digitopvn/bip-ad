@@ -8,12 +8,20 @@ import { DomainError } from '../domain/errors';
 import { decisionStatement } from '../domain/ledger';
 import { moderateProduct, pendingModeration } from '../domain/products';
 import { CATCH_UP_DAYS, finalizeCohort, freezeBoard, produceMockMedia, runLock } from '../domain/snapshot';
-import { failPayout, preparePayoutBatch, recordManualTransfer } from '../domain/wallet';
+import { failPayout, piiKeys, preparePayoutBatch, recordManualTransfer } from '../domain/wallet';
 import type { Env } from '../env';
 import { iso } from '../lib/time';
 import { jsonTool } from './common';
 import { emailProjectionBacklog } from '../email/email-projection-state';
 import { runModerationJob, scoresForMany } from '../moderation/ai-moderation-pipeline';
+import { type AdapterRequestRow, describeRequest, listDeadLetters, openDeadLetterCount } from '../ads/adapter-call-log';
+import { retryDeadLetter } from '../ads/adapter-dead-letter-retry';
+import { ADS_EXECUTE_POLICY, adsBlockers, adsReport, executeFlights, planDueFlights } from '../ads/ads-flight-operations';
+import { pauseFlights, readKillSwitch, reconcileHealthy, resumeFlights, setKillSwitch } from '../ads/ads-safety-controls';
+import { parseAdsChannels } from '../ads/zernio-ads-adapter';
+import { detectAlerts } from '../monitoring/operator-alerts';
+import { publishSnapshot } from '../social/social-publisher';
+import { zernioAccounts } from '../social/zernio-social-adapter';
 
 const ACTOR = 'operator:grok';
 
@@ -35,8 +43,10 @@ export function operatorMcpServer(env: Env) {
   const cfg = config(env);
   const server = new McpServer({ name: 'bip-ad-operator', version: '0.1.0' });
 
-  jsonTool(server, 'operator.health', 'Email projection backlog, last lock, pending moderation and payout counts.', {}, true, async () => {
+  jsonTool(server, 'operator.health', 'Email projection backlog, last lock, pending moderation and payout counts, adapter modes, ads kill switch, dead letters and current alert conditions.', {}, true, async () => {
     const q = async (sql: string) => (await db.prepare(sql).first<{ n: number }>())?.n ?? 0;
+    const rec = await reconcile(db);
+    const ads = parseAdsChannels(env.ZERNIO_ADS_ACCOUNTS);
     return {
       payment_mode: cfg.paymentMode,
       pending_moderation: await q(`SELECT COUNT(*) AS n FROM products WHERE status = 'pending_review'`),
@@ -44,7 +54,17 @@ export function operatorMcpServer(env: Env) {
       email_projection_backlog: await emailProjectionBacklog(db),
       open_payout_requests: await q(`SELECT COUNT(*) AS n FROM payout_requests WHERE state IN ('requested', 'batched')`),
       last_lock: await db.prepare(`SELECT resource_id, status, finished_at FROM job_runs WHERE job_type = 'daily_lock' ORDER BY resource_id DESC LIMIT 1`).first(),
-      adapters: { video: 'mocked', social: 'mocked', ads: 'mocked' },
+      adapters: {
+        video: 'mocked',
+        social: { mode: cfg.socialMode, zernio_key_set: !!env.ZERNIO_API_KEY, accounts: Object.keys(zernioAccounts(env)) },
+        ads: { mode: cfg.adsMode, zernio_key_set: !!env.ZERNIO_API_KEY, channels: ads.channels.map(c => c.channel), channel_config_error: ads.error },
+      },
+      ads_kill_switch: await readKillSwitch(db, cfg),
+      reconcile_balanced: reconcileHealthy(rec),
+      dead_letters_open: await openDeadLetterCount(db),
+      alerts: (await detectAlerts(db, rec)).map(x => ({ kind: x.kind, title: x.title, ...x.detail })),
+      operator_alerts_unsent: await q(`SELECT COUNT(*) AS n FROM operator_alerts WHERE status IN ('pending', 'failed')`),
+      alert_email_set: !!env.OPERATOR_ALERT_EMAIL,
     };
   });
 
@@ -74,7 +94,7 @@ export function operatorMcpServer(env: Env) {
     return finalizeCohort(db, a.board, cutoffArg(a.cutoff_at));
   });
 
-  jsonTool(server, 'locks.run', 'Run the full 03:12 lock (3 snapshots, 3 cohorts, mock media) for a cutoff. Idempotent.', { cutoff_at: z.string() }, false, async a => runLock(db, cfg.origin, cutoffArg(a.cutoff_at)));
+  jsonTool(server, 'locks.run', 'Run the full 03:12 lock (3 snapshots, 3 cohorts with their ad flights, mock media) for a cutoff. Idempotent.', { cutoff_at: z.string() }, false, async a => runLock(db, cfg.origin, cutoffArg(a.cutoff_at)));
 
   jsonTool(server, 'videos.render', 'Mock video adapter: records the Top 10 composition and content hash with status "mocked". No MP4 is rendered.', { snapshot_id: z.string() }, false, async a => {
     await produceMockMedia(db, a.snapshot_id, cfg.origin);
@@ -82,38 +102,68 @@ export function operatorMcpServer(env: Env) {
     return { assets: results };
   });
 
-  jsonTool(server, 'social.publish', 'Mock social adapter (Zernio not connected): shows publication records with status "mocked". Nothing is posted.', { snapshot_id: z.string() }, true, async a => {
-    const { results } = await db.prepare('SELECT platform, external_post_id, url, state FROM social_publications WHERE snapshot_id = ?').bind(a.snapshot_id).all();
-    return { publications: results };
-  });
+  jsonTool(server, 'social.publish', 'Publish a snapshot\'s Top 10 to X, Facebook, YouTube and TikTok through Zernio. SOCIAL_MODE=mock (default): nothing is posted and the mocked records are shown. live: one idempotent post per platform; YouTube and TikTok need video_url (a public https video you checked); failures go to the dead-letter queue.', {
+    snapshot_id: z.string(), video_url: z.url({ protocol: /^https$/ }).max(2000).optional(),
+  }, false, async a => publishSnapshot(env, cfg, a.snapshot_id, { actor: ACTOR, videoUrl: a.video_url }));
 
-  jsonTool(server, 'ads.plan', 'Planned ad flights per board with hard spend caps. Ads adapter is mocked; no campaign is created.', { board: z.enum(['daily', 'weekly', 'monthly']).optional() }, true, async a => {
-    const { results } = await db.prepare(`SELECT f.*, c.cutoff_at FROM ad_flights f JOIN revenue_cohorts c ON c.id = f.cohort_id ${a.board ? 'WHERE f.board = ?' : ''} ORDER BY f.start_at DESC LIMIT 100`)
-      .bind(...(a.board ? [a.board] : [])).all();
-    return { flights: results };
-  });
-
-  jsonTool(server, 'ads.execute', 'Request spend on a flight. Always checked server-side against the flight cap; cross-board spend is refused. Adapter is mocked.', {
-    flight_id: z.string(), board: z.string(), amount_minor: z.number().int().positive(),
+  jsonTool(server, 'ads.plan', 'Plan the ad flights the lock created: split each flight\'s budget across the configured channels within its spend cap and daily cap (deterministic rules, one board per flight). Then lists flights with their allocations.', {
+    board: z.enum(['daily', 'weekly', 'monthly']).optional(),
   }, false, async a => {
-    const f = await db.prepare('SELECT * FROM ad_flights WHERE id = ?').bind(a.flight_id).first<{ id: string; board: string; spend_cap_minor: number; committed_minor: number }>();
-    const now = iso(Date.now());
-    const deny = async (reason: string) => {
-      await decisionStatement(db, { actor: ACTOR, action: 'ads.execute', decision: 'deny', reasons: [reason], policy: 'ads-v1', resourceId: a.flight_id, result: { amount: a.amount_minor } }, now).run();
-      throw new DomainError(reason.toLowerCase(), `Denied: ${reason}`, 403);
-    };
-    if (!f) throw new DomainError('not_found', 'Flight not found', 404);
-    if (!isBoard(a.board) || a.board !== f.board) await deny('CROSS_BOARD_SPEND');
-    // Cumulative cap, enforced atomically: the commitment is recorded only while it stays within the cap.
-    const r = await db.prepare('UPDATE ad_flights SET committed_minor = committed_minor + ? WHERE id = ? AND committed_minor + ? <= spend_cap_minor')
-      .bind(a.amount_minor, f.id, a.amount_minor).run();
-    if (!r.meta.changes) await deny('EXCEEDS_FLIGHT_CAP');
-    await decisionStatement(db, { actor: ACTOR, action: 'ads.execute', decision: 'defer', reasons: ['ADS_ADAPTER_MOCKED'], policy: 'ads-v1', resourceId: f.id, result: { amount: a.amount_minor } }, now).run();
-    return { status: 'mocked', committed_minor: f.committed_minor + a.amount_minor, spend_cap_minor: f.spend_cap_minor, note: 'Within cap and committed against it. Ads execution is out of scope for this MVP; nothing was spent.' };
+    const blockers = await adsBlockers(env, cfg, reconcile);
+    const run = blockers.length ? { planned: [], channel_config_error: null, blocked: blockers } : await planDueFlights(env, cfg, { actor: ACTOR });
+    const { results } = await db.prepare(`SELECT f.*, c.cutoff_at, (SELECT json_group_array(json_object('channel', channel, 'daily_minor', daily_minor, 'amount_minor', amount_minor, 'state', state))
+        FROM ad_flight_allocations WHERE flight_id = f.id) AS allocations FROM ad_flights f JOIN revenue_cohorts c ON c.id = f.cohort_id ${a.board ? 'WHERE f.board = ?' : ''} ORDER BY f.start_at DESC LIMIT 100`)
+      .bind(...(a.board ? [a.board] : [])).all<Record<string, unknown>>();
+    return { ads_mode: cfg.adsMode, run, flights: results.map(f => ({ ...f, allocations: JSON.parse(String(f.allocations ?? '[]')) })) };
   });
+
+  jsonTool(server, 'ads.execute', 'Execute the planned allocations of a flight whose window is open. Cross-board requests are refused. Dry run (default): the exact Zernio requests are recorded and nothing is sent, committed or spent. Refused while the kill switch is on or finance.reconcile is unbalanced.', {
+    flight_id: z.string(), board: z.string(),
+  }, false, async a => {
+    const f = await db.prepare('SELECT id, board FROM ad_flights WHERE id = ?').bind(a.flight_id).first<{ id: string; board: string }>();
+    if (!f) throw new DomainError('not_found', 'Flight not found', 404);
+    if (!isBoard(a.board) || a.board !== f.board) {
+      await decisionStatement(db, { actor: ACTOR, action: 'ads.execute', decision: 'deny', reasons: ['CROSS_BOARD_SPEND'], policy: ADS_EXECUTE_POLICY, resourceId: f.id, result: { board: a.board } }, iso(Date.now())).run();
+      throw new DomainError('cross_board_spend', 'Denied: CROSS_BOARD_SPEND', 403);
+    }
+    return executeFlights(env, cfg, reconcile, { actor: ACTOR, flightId: f.id });
+  });
+
+  jsonTool(server, 'ads.pause', 'Pause one flight, or every unfinished flight when flight_id is omitted. Logged; live campaigns are paused at the provider too.', {
+    flight_id: z.string().optional(), reason: z.string().min(3).max(200),
+  }, false, async a => pauseFlights(env, cfg, `OPERATOR: ${a.reason}`, { actor: ACTOR, flightIds: a.flight_id ? [a.flight_id] : undefined }));
+
+  jsonTool(server, 'ads.resume', 'Resume paused flights where they stopped (one, or all). Refused while the kill switch is on or finance.reconcile is unbalanced.', {
+    flight_id: z.string().optional(), note: z.string().min(3).max(200),
+  }, false, async a => resumeFlights(env, cfg, reconcile, a.note, { actor: ACTOR, flightIds: a.flight_id ? [a.flight_id] : undefined }));
+
+  jsonTool(server, 'ads.kill_switch', 'Engage (pauses every flight and stops planning and execution) or release the ads kill switch. ADS_KILL_SWITCH=true in the configuration overrides a release. Releasing does not resume flights: use ads.resume.', {
+    engaged: z.boolean(), reason: z.string().min(3).max(200),
+  }, false, async a => setKillSwitch(env, cfg, a.engaged, a.reason, { actor: ACTOR }));
+
+  jsonTool(server, 'ads.report', 'End-of-period report: per ended flight the cap, planned, committed, spent and unspent money with the reasons, plus totals per board.', {
+    board: z.enum(['daily', 'weekly', 'monthly']).optional(), ended_before: z.iso.datetime().optional(),
+  }, true, async a => adsReport(db, { board: a.board, endedBefore: a.ended_before }));
+
+  jsonTool(server, 'adapters.requests', 'Recorded adapter requests (newest first): in a dry run these are exactly the requests that would be sent. No credentials are stored.', {
+    adapter: z.enum(['ads', 'social']).optional(), resource_id: z.string().optional(), limit: z.number().int().min(1).max(200).optional(),
+  }, true, async a => {
+    const where: string[] = [];
+    const binds: unknown[] = [];
+    if (a.adapter) { where.push('adapter = ?'); binds.push(a.adapter); }
+    if (a.resource_id) { where.push('resource_id = ?'); binds.push(a.resource_id); }
+    const { results } = await db.prepare(`SELECT * FROM adapter_requests ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT ?`).bind(...binds, a.limit ?? 50).all<AdapterRequestRow>();
+    return { requests: results.map(describeRequest) };
+  });
+
+  jsonTool(server, 'adapters.dead_letters', 'Failed live adapter calls (Zernio social posts, ad campaigns) waiting for a retry.', { status: z.enum(['open', 'resolved']).optional() }, true,
+    async a => ({ dead_letters: await listDeadLetters(db, a.status ?? 'open') }));
+
+  jsonTool(server, 'adapters.retry', 'Retry a dead-lettered adapter call with its original request and idempotency key (no duplicate post or campaign). Refused when the adapter is no longer live.', { dead_letter_id: z.string() }, false,
+    async a => retryDeadLetter(env, cfg, a.dead_letter_id, { actor: ACTOR }));
 
   jsonTool(server, 'payouts.prepare_batch', 'Prepare the monthly manual payout batch (lists beneficiaries for the operator). Idempotent per month.', { window_month: z.string().describe('YYYY-MM') }, false,
-    async a => preparePayoutBatch(db, env.SESSION_SECRET, ACTOR, a.window_month));
+    async a => preparePayoutBatch(db, piiKeys(env), ACTOR, a.window_month));
 
   jsonTool(server, 'payouts.record_manual_transfer', 'Record a bank transfer the operator made by hand (days 01-10 ICT only). Requires reference, exact amount and proof.', {
     payout_request_id: z.string(), bank_transfer_reference: z.string().min(3).max(120), amount_minor: z.number().int().positive(), transferred_at: z.string(), proof_ref: z.string().min(3).max(300),
@@ -129,7 +179,7 @@ export function operatorMcpServer(env: Env) {
     return { reviews: results };
   });
 
-  jsonTool(server, 'payments.resolve_review', 'Resolve a payment review: settle (a capture of exactly the full quote) or dismiss (money handled at the provider, e.g. refunded). Logged.', {
+  jsonTool(server, 'payments.resolve_review', 'Resolve a payment review: settle (a capture of exactly the full quote that the provider has not partly refunded) or dismiss (money handled at the provider, e.g. refunded). Settling a partly refunded capture is refused (not_settleable, partially_refunded) and dismisses the review. status "settling" means another request is settling it. Logged.', {
     review_id: z.string(), resolution: z.enum(['settle', 'dismiss']), note: z.string().min(3).max(300),
   }, false, async a => resolvePaymentReview(db, cfg, ACTOR, a.review_id, a.resolution, a.note));
 

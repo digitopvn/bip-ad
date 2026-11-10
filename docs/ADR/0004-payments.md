@@ -16,6 +16,8 @@ Any other non-empty value (for example `Live`) is a configuration error: the Wor
 
 `PAYMENT_MODE` switches every provider at once, so each provider is offered only when its secrets are set (`providerEnabled` in [`checkout.ts`](../../src/payments/checkout.ts)): PayPal needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` and `PAYPAL_WEBHOOK_ID`, and SePay needs `SEPAY_MERCHANT_ID`, `SEPAY_SECRET_KEY` and `SEPAY_IPN_SECRET`. The checkout page hides an unconfigured provider, and `/checkout/{id}/pay` and `boosts.checkout` refuse it before the intent changes. Simulated mode offers every provider.
 
+The `/checkout/{id}` page shows the quote, wallet split, projected rank and pay buttons only to the intent's signed-in owner. Anyone else holding the URL sees the product name and a sign-in link that returns to the checkout (`checkoutLockedPage` in [`checkout.ts`](../../src/views/checkout.ts)). A checkout created over MCP is opened by the owner in a browser, so signing in there is the normal path.
+
 Environments (2026-11-09, owner-approved): staging runs `sandbox` against PayPal's sandbox, and production runs `live` with `PAYPAL_API_BASE=https://api-m.paypal.com`. SePay is set up in neither, so VND quotes can be paid only from the wallet. `scripts/setup-paypal.sh staging|production` reads the REST app credentials with hidden prompts, checks them against PayPal, creates or reuses the webhook for `https://{host}/api/webhooks/paypal`, and stores the three secrets in the AgentKit vault and on the worker. `scripts/paypal-webhook-and-worker-secrets.mjs` does the same non-interactively for credentials already in the vault, run through `ak secrets run`. Neither database held simulated money when the mode changed; staging holds only the labelled sample boosts, which have no payments or ledger entries.
 
 Real sandbox credentials were out of scope for the MVP, so the sandbox and live paths were written from the provider docs and tested with simulated webhooks. PayPal is verified end to end on staging's sandbox before production takes live money.
@@ -26,14 +28,17 @@ Real sandbox credentials were out of scope for the MVP, so the sandbox and live 
   - a webhook verified through `/v1/notifications/verify-webhook-signature`, or
   - the response of the server-side capture call.
 - The verification request carries the webhook body byte for byte (`verificationRequestBody` in [`paypal.ts`](../../src/payments/paypal.ts)), because PayPal checks the signature against the event exactly as it was sent.
-- PayPal's return redirect (`GET /checkout/{id}/paypal-return?token=…`) has no side effects. It renders a page whose button POSTs to `/checkout/{id}/paypal-capture`, and only that POST captures the order. Link prefetchers and previews that follow the return URL therefore cannot capture. The order token is the credential, so the POST does not need a session.
+- PayPal's return redirect (`GET /checkout/{id}/paypal-return?token=…`) has no side effects. It renders a page whose button POSTs to `/checkout/{id}/paypal-capture`, and only that POST captures the order. Link prefetchers and previews that follow the return URL therefore cannot capture. Both the return page and the capture POST need the owner's session as well as the order token. Anyone else, including an owner whose session expired at PayPal, is sent to `/login?next=` and comes back to the return page.
 - `PENDING` and `DENIED` captures never confirm a bid.
 - `REFUNDED` and `REVERSED` run the refund path. The capture is resolved through `links[rel=up]`.
-- A `REFUNDED` event carries that refund's own amount. A **partial refund keeps the bid**: it is recorded in `payment_reviews` for the operator, and the ledger is not changed automatically. When the recorded refunds of a capture add up to the captured cash, the whole payment is reversed like a full refund and those reviews are closed.
+- A `REFUNDED` event carries that refund's own amount. A **partial refund of a settled payment keeps the bid**: it is recorded in `payment_reviews` for the operator, and the ledger is not changed automatically. When the recorded refunds of a capture add up to the captured cash, the whole payment is reversed like a full refund and those reviews are closed.
 - A capture sent through the other provider than the intent's is recorded for review; the intent is left untouched so the right provider can still pay it.
 - A reversal of a capture that only exists as a review (never settled) changes no ledger entry; it dismisses the review, so money already returned cannot be settled. A partial refund of held money keeps the review open until the refunds reach the captured amount.
+- **A held capture that received any partial refund cannot be settled** (owner decision, 2026-11-10). `payments.resolve_review` `settle` refuses it with `not_settleable` and a message starting `partially_refunded`, dismisses the review and fails the intent; the operator refunds the rest at the provider. The settlement batch re-checks this, so a partial refund that arrives while a settlement runs refuses it the same way. When the later refunds reach the captured amount, the partial-refund reviews close as usual and no ledger entry is written.
 - An operator settlement claims the review before settling. A reversal that races it sees the claimed review, reverses the payment once it exists, or asks the provider to redeliver. A claim that is older than 10 minutes and has no payment means the settling request died; it is listed again in `payments.reviews` and can be settled or dismissed (including by a provider reversal).
-- Dismissing a review fails its intent only when no other open capture review still needs that intent.
+- The settlement batch commits only while the request's own claim still holds, and it writes the operator's `allow` decision log in the same batch, so a slow request whose claim was taken over cannot settle, and no settlement exists without its decision. Another caller that finds the review claimed gets `settling`, not `settled`.
+- A dismissal applies its side effects (the `deny` decision log, failing the intent, releasing a wallet reservation) only when its own `UPDATE` closed the review: the guard checks SQLite's `changes()` for that statement, which a D1 batch runs in order on one connection (`test/payment-review-resolution-edge-cases.test.ts` pins this).
+- Dismissing a review fails its intent only when no other capture review still needs that intent: one that is open, or claimed for settlement with no payment yet. This is checked again inside the dismissal batch.
 
 ## SePay
 - The checkout form is signed with HMAC-SHA256 over the fields in the documented order, then base64-encoded.
@@ -57,7 +62,7 @@ A verified capture that does not match its intent is never silently kept. Exampl
 
 1. It is recorded in `payment_reviews`.
 2. The intent moves to `needs_review`, and any wallet reservation is released.
-3. The operator resolves it with `payments.resolve_review`: `settle` only for a capture of exactly the full locked quote with no wallet portion, otherwise `dismiss` after refunding at the provider.
+3. The operator resolves it with `payments.resolve_review`: `settle` only for a capture of exactly the full locked quote with no wallet portion and no partial refund, otherwise `dismiss` after refunding at the provider.
 
 Wallet funds can be applied only to a fresh quote, before checkout starts, so the amount a PayPal order or SePay form was built for never changes.
 

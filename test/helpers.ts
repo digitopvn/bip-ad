@@ -23,7 +23,11 @@ export async function makeProduct(ownerId: string, name: string, publishedMs = D
   const p = await createProduct(db(), ownerId, { name, tagline: `${name} tagline`, website_url: 'https://example.com' }, newId('k'));
   await setBlocks(db(), ownerId, p.id, [{ type: 'hero', headline: name }]);
   await submitProduct(db(), cfg(), ownerId, p.id);
-  await db().prepare('UPDATE products SET published_at = ? WHERE id = ?').bind(iso(publishedMs), p.id).run();
+  await db().batch([
+    db().prepare('UPDATE products SET published_at = ? WHERE id = ?').bind(iso(publishedMs), p.id),
+    // Backdate the state history with it, so boards as of a past cutoff see the product as published then.
+    db().prepare('UPDATE product_state_history SET changed_at = ? WHERE product_id = ?').bind(iso(publishedMs), p.id),
+  ]);
   return p.id;
 }
 
