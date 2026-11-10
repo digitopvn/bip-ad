@@ -115,7 +115,10 @@ describe('PayPal', () => {
   });
 
   it('PayPal return GET has no side effects; only the POST it renders captures and settles', async () => {
-    const { p, intent } = await openIntent('paypal');
+    const { u, p, intent } = await openIntent('paypal');
+    const sid = newId('sid');
+    await E.OAUTH_KV.put(`session:${sid}`, JSON.stringify({ userId: u, csrf: newId('csrf') }));
+    const owner = { cookie: `bip_session=${sid}` };
     const orderId = `ORDER-${intent.id}`;
     await db().prepare('UPDATE bid_intents SET provider_order_id = ? WHERE id = ?').bind(orderId, intent.id).run();
     const sandboxEnv = { ...E, PAYMENT_MODE: 'sandbox', PAYPAL_CLIENT_ID: 'id', PAYPAL_CLIENT_SECRET: 'sec', PAYPAL_API_BASE: 'https://paypal.test' };
@@ -128,7 +131,7 @@ describe('PayPal', () => {
     });
     try {
       const base = `https://bip.test/checkout/${intent.id}`;
-      const get = await app.request(`${base}/paypal-return?token=${orderId}`, {}, sandboxEnv);
+      const get = await app.request(`${base}/paypal-return?token=${orderId}`, { headers: owner }, sandboxEnv);
       expect(get.status).toBe(200);
       const page = await get.text();
       expect(page).toContain(`action="/checkout/${intent.id}/paypal-capture"`);
@@ -136,7 +139,7 @@ describe('PayPal', () => {
       expect(calls).toEqual([]);
       expect(await contributions(intent.id)).toBe(0);
 
-      const post = (token: string) => app.request(`${base}/paypal-capture`, { method: 'POST', body: new URLSearchParams({ token }) }, sandboxEnv);
+      const post = (token: string) => app.request(`${base}/paypal-capture`, { method: 'POST', body: new URLSearchParams({ token }), headers: owner }, sandboxEnv);
       const bad = await post('ORDER-other');
       expect(bad.headers.get('location')).toBe(`/checkout/${intent.id}?r=error`);
       expect(calls).toEqual([]);
@@ -149,7 +152,7 @@ describe('PayPal', () => {
       expect(await activeUnits(p)).toBe(1500);
 
       // Once settled, following the return link again just shows the checkout.
-      const again = await app.request(`${base}/paypal-return?token=${orderId}`, { redirect: 'manual' }, sandboxEnv);
+      const again = await app.request(`${base}/paypal-return?token=${orderId}`, { redirect: 'manual', headers: owner }, sandboxEnv);
       expect(again.headers.get('location')).toBe(`/checkout/${intent.id}`);
     } finally {
       spy.mockRestore();

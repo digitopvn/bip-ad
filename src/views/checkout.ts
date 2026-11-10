@@ -4,7 +4,7 @@ import { icon, notice, productHref } from './components';
 import { boardLabel, boardWindow, formatIctDateTime, formatMoney, formatRankUnits } from './format';
 import { html, seg, type SafeHtml } from './html';
 import { layout } from './layout';
-import type { CheckoutView, LayoutContext } from './types';
+import type { CheckoutLockedView, CheckoutView, LayoutContext } from './types';
 
 type Method = 'paypal' | 'sepay' | 'wallet';
 
@@ -53,13 +53,13 @@ function outcome(view: CheckoutView): SafeHtml | '' {
   return '';
 }
 
+const signInHref = (path: string) => `/login?next=${encodeURIComponent(path)}`;
+
 function payArea(view: CheckoutView): SafeHtml {
   const status = view.status.toLowerCase();
   if (!PAYABLE.has(status)) return html``;
   if (!view.isOwner) {
-    return html`<div class="panel-box pay-locked"><p>Sign in as the product owner to pay.</p><a class="btn btn-primary btn-sm" href="/login?next=${encodeURIComponent(
-      `/checkout/${view.intentId}`,
-    )}">Sign in</a></div>`;
+    return html`<div class="panel-box pay-locked"><p>Sign in as the product owner to pay.</p><a class="btn btn-primary btn-sm" href="${signInHref(`/checkout/${view.intentId}`)}">Sign in</a></div>`;
   }
   if (view.dueMinor <= 0) {
     return html`<div class="pay-options">${payForm(view, 'wallet', formatMoney(view.quoteCurrency, view.walletAppliedMinor))}</div>`;
@@ -100,6 +100,24 @@ export function checkoutPage(ctx: LayoutContext, view: CheckoutView): string {
         <p class="muted">Pay-to-win: the highest active bid ranks first and other bids can pass yours at any time. Your rank moves only after the provider confirms the payment.</p>
         ${payArea(view)}
       </div>
+    </div>
+  </div>
+</section>`;
+  return layout(ctx, body.toString());
+}
+
+/**
+ * Checkout for a visitor who is not the signed-in owner of the intent: the product name and a
+ * sign-in link that returns here. The quote, wallet split and pay buttons are never rendered.
+ */
+export function checkoutLockedPage(ctx: LayoutContext, view: CheckoutLockedView): string {
+  const body = html`<section class="section-tight checkout" aria-labelledby="co-title">
+  <div class="wrap narrow">
+    <p class="kicker">Checkout</p>
+    <h1 class="h2" id="co-title">Checkout for ${view.productName}</h1>
+    <div class="panel-box pay-locked">
+      <p>${view.signedIn ? 'This checkout belongs to another account. ' : ''}Sign in as the owner to view and pay.</p>
+      <a class="btn btn-primary btn-sm" href="${signInHref(`/checkout/${view.intentId}`)}">Sign in</a>
     </div>
   </div>
 </section>`;
