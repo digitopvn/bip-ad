@@ -16,7 +16,7 @@ Any other non-empty value (for example `Live`) is a configuration error: the Wor
 
 `PAYMENT_MODE` switches every provider at once, so each provider is offered only when its secrets are set (`providerEnabled` in [`checkout.ts`](../../src/payments/checkout.ts)): PayPal needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` and `PAYPAL_WEBHOOK_ID`, and SePay needs `SEPAY_MERCHANT_ID`, `SEPAY_SECRET_KEY` and `SEPAY_IPN_SECRET`. The checkout page hides an unconfigured provider, and `/checkout/{id}/pay` and `boosts.checkout` refuse it before the intent changes. Simulated mode offers every provider.
 
-Environments (2026-11-09, owner-approved): staging runs `sandbox` against PayPal's sandbox, and production runs `live` with `PAYPAL_API_BASE=https://api-m.paypal.com`. SePay is set up in neither, so VND quotes can be paid only from the wallet. `scripts/setup-paypal.sh staging|production` reads the REST app credentials with hidden prompts, checks them against PayPal, creates or reuses the webhook for `https://{host}/api/webhooks/paypal`, and stores the three secrets in the AgentKit vault and on the worker. Neither database held simulated money when the mode changed; staging holds only the labelled sample boosts, which have no payments or ledger entries.
+Environments (2026-11-09, owner-approved): staging runs `sandbox` against PayPal's sandbox, and production runs `live` with `PAYPAL_API_BASE=https://api-m.paypal.com`. SePay is set up in neither, so VND quotes can be paid only from the wallet. `scripts/setup-paypal.sh staging|production` reads the REST app credentials with hidden prompts, checks them against PayPal, creates or reuses the webhook for `https://{host}/api/webhooks/paypal`, and stores the three secrets in the AgentKit vault and on the worker. `scripts/paypal-webhook-and-worker-secrets.mjs` does the same non-interactively for credentials already in the vault, run through `ak secrets run`. Neither database held simulated money when the mode changed; staging holds only the labelled sample boosts, which have no payments or ledger entries.
 
 Real sandbox credentials were out of scope for the MVP, so the sandbox and live paths were written from the provider docs and tested with simulated webhooks. PayPal is verified end to end on staging's sandbox before production takes live money.
 
@@ -63,3 +63,5 @@ Wallet funds can be applied only to a fresh quote, before checkout starts, so th
 
 ## Late captures
 A capture that arrives after the quote expired still settles at the locked price, because the money has arrived.
+
+The CSP `form-action` lists every host a form POST redirects to (GitHub and Google sign-in from MCP consent, PayPal and SePay from checkout). Chrome blocks a post-redirect to an unlisted host without any error page, which is how MCP sign-in failed on staging.

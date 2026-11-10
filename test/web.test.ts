@@ -118,3 +118,13 @@ describe('MCP endpoints', () => {
     expect(names).toEqual(expect.arrayContaining(['products.moderate', 'boards.freeze', 'payouts.prepare_batch', 'payouts.record_manual_transfer', 'finance.reconcile']));
   });
 });
+
+describe('content security policy', () => {
+  it('lets forms redirect to the sign-in and payment hosts they post through', async () => {
+    const r = await SELF.fetch(`${BASE}/`, { headers: UA });
+    const formAction = (r.headers.get('content-security-policy') ?? '').split(';').map(d => d.trim()).find(d => d.startsWith('form-action')) ?? '';
+    for (const host of ['https://github.com', 'https://accounts.google.com', 'https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://pay.sepay.vn']) {
+      expect(formAction, host).toContain(host);
+    }
+  });
+});

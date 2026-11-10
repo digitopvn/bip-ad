@@ -51,7 +51,12 @@ app.use('*', secureHeaders({
     mediaSrc: ['https:'],
     connectSrc: ["'self'"],
     frameAncestors: ["'none'"],
-    formAction: ["'self'", 'https://pay.sepay.vn', 'https://pay-sandbox.sepay.vn'],
+    // Chrome applies form-action to redirects after a POST: the consent form redirects to GitHub/Google
+    // sign-in, and the checkout form to the PayPal or SePay payment page.
+    formAction: [
+      "'self'", 'https://github.com', 'https://accounts.google.com',
+      'https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://pay.sepay.vn', 'https://pay-sandbox.sepay.vn',
+    ],
   },
   crossOriginEmbedderPolicy: false,
 }));
