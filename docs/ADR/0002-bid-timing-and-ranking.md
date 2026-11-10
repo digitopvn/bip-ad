@@ -26,10 +26,29 @@ Products are ordered by these keys, in priority order:
 6. `published_at`, newest first.
 7. `product_id`, ascending.
 
+Keys 3 and 4 are read from `ranking_metric_rollups` (migration `0006`), never from raw `measurement_events` on a page view:
+
+- The hourly cron writes a metric set ending at its run time, and each lock writes one stamped at the cutoff. A set is one `INSERT ... SELECT` over the 30-day window with the same filters as above.
+- Live boards (`loadStandings` in [`ranking.ts`](../../src/domain/ranking.ts)) use the latest set, so their clicks and views can be up to about an hour old. Active bids and referrals stay live.
+- Hourly sets are pruned after a day. Cutoff sets are kept, so the scores of every snapshot can be reproduced.
+
 ## Snapshots
 - A snapshot is computed only from rows committed before the cutoff. Contributions voided after the cutoff still count.
+- It uses the state of each product at the cutoff (`loadCutoffStandings`), from `product_state_history`. Triggers on `products` record every change of status, version and live page version, stamped with `updated_at`. A lock that runs late therefore:
+  - includes a product that was published at the cutoff and suspended after it, stored as removed from publication;
+  - pins the page version and product version that were live at the cutoff;
+  - leaves out a product first published after the cutoff.
+- Products that existed before migration `0006` have their current state backfilled from `published_at`. Page versions they had before that are not reconstructed.
 - It is stored once per `(board, cutoff_at)`.
 - Database triggers make snapshot rows immutable. The only change allowed is marking an item as removed from publication.
+
+## D1 query limits
+The lock and housekeeping cron invocations assume the Workers Free limit of 50 D1 queries per invocation. A `db.batch()` counts as one query.
+
+- The header, items and outbox event of a snapshot commit in one batch. Items are inserted 200 per statement from a JSON parameter, which stays far below the 100 KB statement and 2 MB value limits at about 1,000 products.
+- `scheduledJob` ([`index.ts`](../../src/index.ts)) meters every query against `SCHEDULED_QUERY_CAP` (45). Work runs in priority order: the lock and the catch-up of missed cutoffs, then the hourly metric rollup, then quote expiry, commission vesting and the AI moderation sweep. Each housekeeping step gets a page sized to the queries left.
+- `runLock` starts a step (freeze, finalize or media of one board) only when the step's worst case fits (`LOCK_STEP_QUERIES` in [`snapshot.ts`](../../src/domain/snapshot.ts)). Otherwise the job stays `running` and the next hourly run resumes it. Finished steps only cost their "already done" check. Cutoffs are locked oldest first, and a later cutoff is not started while an earlier one is incomplete.
+- One fresh cutoff fits in one invocation. Catching up three missed cutoffs takes about three hourly runs.
 
 ## Minimum bid
 The minimum increment comes from `MIN_BID_UNITS` and `MIN_BID_INCREMENT_UNITS`. The sandbox default is 100 units, which is USD 1.
