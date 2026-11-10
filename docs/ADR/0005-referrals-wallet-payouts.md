@@ -1,6 +1,6 @@
 # ADR-0005: Referral policy ref-v1, commission wallet and manual payouts
 
-Status: MVP defaults. The first-external-cash-bid commission rule below is owner-approved (2026-11-10); the other defaults still need owner approval before go-live.
+Status: accepted. All referral, wallet and payout defaults below are owner-approved (2026-11-10), including the first-external-cash-bid commission rule.
 
 ## Attribution
 - `/r/{code}` sets a signed cookie that lasts 30 days (`REFERRAL_ATTRIBUTION_DAYS`).
