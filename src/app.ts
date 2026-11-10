@@ -23,11 +23,11 @@ import { checkoutForm, verifyIpn } from './payments/sepay';
 import { assertProviderEnabled, createProviderCheckout } from './payments/checkout';
 import { scheduleEmailProcessing } from './email/process-emails';
 import { accountEmailView, registerEmailRoutes } from './routes/email-routes';
-import { accountView, boardView, checkoutView, homeView, layoutCtx, productView, snapshotView } from './routes/view-data';
+import { accountView, boardView, checkoutLockedView, checkoutView, homeView, layoutCtx, productView, snapshotView } from './routes/view-data';
 import { accountPage } from './views/account';
 import { authorizePage } from './views/authorize';
 import { boardPage } from './views/board';
-import { checkoutPage, paypalReturnPage } from './views/checkout';
+import { checkoutLockedPage, checkoutPage, paypalReturnPage } from './views/checkout';
 import { errorPage } from './views/error';
 import { homePage } from './views/home';
 import { privacyPage } from './views/legal-privacy-page';
@@ -178,20 +178,29 @@ app.get('/account/payouts', accountHandler);
 registerEmailRoutes(app, { viewer, page });
 
 // ---------- Checkout (human approval step) ----------
+// Only the intent's signed-in owner sees the quote, wallet split and pay buttons, and only the
+// owner can complete a PayPal return. Everyone else gets the product name and a sign-in link
+// that comes back to the same step (MCP-created checkouts are opened by the owner in a browser).
+
+const signInRedirect = (c: C, next: string) => c.redirect(`/login?next=${encodeURIComponent(next)}`, 303);
 
 app.get('/checkout/:id', async c => {
   const intent = await getIntent(c.env.DB, c.req.param('id'));
   if (!intent) return notFoundPage(c, 'No checkout with that id.');
   const { session, user } = await viewer(c);
+  if (!session || !user || user.id !== intent.owner_id) {
+    const v = await checkoutLockedView(c.env, intent, !!user);
+    return page(c, 'Checkout — bip.ad', ctx => checkoutLockedPage(ctx, v));
+  }
   const cfg = config(c.env);
   // SePay sandbox/live: hand the browser a signed auto-submitting form.
-  if (c.req.query('go') === 'sepay' && user?.id === intent.owner_id && cfg.paymentMode !== 'simulated' && intent.provider === 'sepay' && intent.status === 'awaiting_payment') {
+  if (c.req.query('go') === 'sepay' && cfg.paymentMode !== 'simulated' && intent.provider === 'sepay' && intent.status === 'awaiting_payment') {
     const f = await checkoutForm(c.env, intent.id, intent.quote_minor - intent.wallet_applied_minor, cfg.origin);
     const inputs = Object.entries(f.fields).map(([k, v]) => `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`).join('');
     return c.html(`<!doctype html><meta charset="utf-8"><title>Redirecting to SePay</title><form id="f" method="post" action="${escapeHtml(f.action)}">${inputs}<button>Continue to SePay</button></form><script src="/sepay-submit.js"></script>`);
   }
   const msg = { success: 'Payment submitted. Your rank changes as soon as the provider confirms it.', error: 'The payment did not go through.', cancel: 'Payment cancelled.', paid: 'Payment confirmed. Your bid is live.' }[c.req.query('r') ?? ''] ?? null;
-  const v = await checkoutView(c.env, intent, user?.id === intent.owner_id, session?.csrf ?? '', msg);
+  const v = await checkoutView(c.env, intent, true, session.csrf, msg);
   return page(c, 'Checkout — bip.ad', ctx => checkoutPage(ctx, v));
 });
 
@@ -239,11 +248,13 @@ app.get('/checkout/:id/paypal-return', async c => {
   const token = c.req.query('token');
   if (!intent || config(c.env).paymentMode === 'simulated' || !token || token !== intent.provider_order_id) return c.redirect(`/checkout/${id}?r=error`, 303);
   if (intent.status !== 'awaiting_payment') return c.redirect(`/checkout/${id}`, 303);
+  const { user } = await viewer(c);
+  if (!user || user.id !== intent.owner_id) return signInRedirect(c, `/checkout/${id}/paypal-return?token=${encodeURIComponent(token)}`);
   return page(c, 'Complete payment — bip.ad', ctx => paypalReturnPage(ctx, id, token));
 });
 
-// The order token is the credential: only the payer gets it from PayPal, and capturing completes a
-// payment the payer already approved, so no session is required (it may have expired at PayPal).
+// The order token proves the PayPal approval; the capture also needs the owner's session, like the
+// checkout page. A session that expired while at PayPal signs in again and returns to the return page.
 app.post('/checkout/:id/paypal-capture', async c => {
   const id = c.req.param('id');
   const cfg = config(c.env);
@@ -251,6 +262,8 @@ app.post('/checkout/:id/paypal-capture', async c => {
   const form = await c.req.parseBody();
   const token = typeof form.token === 'string' ? form.token : '';
   if (!intent || cfg.paymentMode === 'simulated' || !token || !intent.provider_order_id || !safeEqual(token, intent.provider_order_id)) return c.redirect(`/checkout/${id}?r=error`, 303);
+  const { user } = await viewer(c);
+  if (!user || user.id !== intent.owner_id) return signInRedirect(c, `/checkout/${id}/paypal-return?token=${encodeURIComponent(token)}`);
   // The redirect alone proves nothing (A06); capture server-to-server and settle from PayPal's answer.
   const cap = await captureOrder(c.env, token);
   if (cap.capture?.status === 'COMPLETED' && cap.capture.custom_id === id) {

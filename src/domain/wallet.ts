@@ -1,6 +1,7 @@
 // Commission wallet: vesting, balances, payout requests and the manual 01-10 payout window.
 import { newId } from '../lib/ids';
-import { decryptField, encryptField } from '../lib/crypto';
+import type { Env } from '../env';
+import { canSealPii, decryptField, encryptField, type PiiKeyring } from '../lib/crypto';
 import { ictDate, iso } from '../lib/time';
 import { type Config, type Currency, REFERRAL_POLICY_VERSION } from './config';
 import { DomainError, isConstraintError, notFound } from './errors';
@@ -55,6 +56,13 @@ export async function vestCommissions(db: D1Database, nowMs = Date.now(), limit 
   return vested;
 }
 
+/** PII keys from the worker secrets. SESSION_SECRET only opens beneficiary references stored before PII_ENCRYPTION_KEY existed. */
+export const piiKeys = (env: Pick<Env, 'PII_ENCRYPTION_KEY' | 'PII_ENCRYPTION_KEY_PREVIOUS' | 'SESSION_SECRET'>): PiiKeyring => ({
+  current: env.PII_ENCRYPTION_KEY || undefined,
+  previous: env.PII_ENCRYPTION_KEY_PREVIOUS || undefined,
+  legacy: env.SESSION_SECRET || undefined,
+});
+
 export interface PayoutInput {
   currency: Currency;
   amountMinor: number;
@@ -64,7 +72,7 @@ export interface PayoutInput {
 }
 
 /** Reserve available balance for a payout. Concurrent bid/payout on the same funds: only one passes the CHECK (A30). */
-export async function requestPayout(db: D1Database, cfg: Config, secret: string, userId: string, p: PayoutInput, nowMs = Date.now()) {
+export async function requestPayout(db: D1Database, cfg: Config, keys: PiiKeyring, userId: string, p: PayoutInput, nowMs = Date.now()) {
   const key = `${userId}:${p.idempotencyKey}`;
   const existing = await db.prepare('SELECT id, state, currency, requested_minor FROM payout_requests WHERE idempotency_key = ?').bind(key).first();
   if (existing) return existing;
@@ -74,6 +82,8 @@ export async function requestPayout(db: D1Database, cfg: Config, secret: string,
   // Simulated money never becomes a real payout: no payouts in simulated mode, and test
   // commissions are excluded from the payable balance in every mode.
   if (cfg.paymentMode === 'simulated') throw new DomainError('payouts_disabled', 'Payouts are disabled while payments run in simulated mode', 409);
+  // Beneficiary details are never sealed with a fallback key: refuse the request until the key is set.
+  if (!canSealPii(keys)) throw new DomainError('payouts_unavailable', 'Payouts are temporarily unavailable: the payout encryption key (PII_ENCRYPTION_KEY, at least 32 characters) is not configured', 503);
   const bal = await db.prepare(`SELECT b.available_minor - COALESCE((SELECT SUM(c.commission_minor) FROM referral_commissions c
       WHERE c.referrer_user_id = b.user_id AND c.currency = b.currency AND c.is_test = 1 AND c.state = 'available'), 0) AS payable
       FROM wallet_balances b WHERE b.user_id = ? AND b.currency = ?`).bind(userId, p.currency).first<{ payable: number }>();
@@ -87,7 +97,7 @@ export async function requestPayout(db: D1Database, cfg: Config, secret: string,
     await db.batch([
       db.prepare(`INSERT INTO payout_requests (id, user_id, currency, requested_minor, state, payout_method, beneficiary_reference, idempotency_key, requested_at, updated_at)
                   VALUES (?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?)`)
-        .bind(id, userId, p.currency, p.amountMinor, p.payoutMethod, await encryptField(secret, ref), key, now, now),
+        .bind(id, userId, p.currency, p.amountMinor, p.payoutMethod, await encryptField(keys, ref), key, now, now),
       db.prepare(`INSERT INTO wallet_reservations (id, user_id, currency, payout_request_id, amount_minor, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .bind(resId, userId, p.currency, id, p.amountMinor, `payout:${id}`, now),
       ...postingStatements(db, { kind: 'wallet_reserve_payout', referenceId: id, memo: `Payout request ${id}`, entries: [
@@ -117,7 +127,7 @@ export async function payoutStatus(db: D1Database, userId: string) {
 /** Manual payouts are transferred on days 01-10 (ICT) of each month. */
 export const inPayoutWindow = (nowMs: number) => Number(ictDate(nowMs).slice(8, 10)) <= 10;
 
-export async function preparePayoutBatch(db: D1Database, secret: string, actor: string, windowMonth: string, nowMs = Date.now()) {
+export async function preparePayoutBatch(db: D1Database, keys: PiiKeyring, actor: string, windowMonth: string, nowMs = Date.now()) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(windowMonth)) throw new DomainError('invalid_month', 'window_month must be YYYY-MM');
   const now = iso(nowMs);
   let batch = await db.prepare('SELECT * FROM payout_batches WHERE window_month = ?').bind(windowMonth).first<{ id: string; status: string }>();
@@ -140,7 +150,7 @@ export async function preparePayoutBatch(db: D1Database, secret: string, actor: 
     id: string; user_id: string; currency: string; requested_minor: number; payout_method: string; beneficiary_reference: string; state: string; display_name: string;
   }>();
   const items = [];
-  for (const r of results) items.push({ ...r, beneficiary_reference: await decryptField(secret, r.beneficiary_reference) });
+  for (const r of results) items.push({ ...r, beneficiary_reference: await decryptField(keys, r.beneficiary_reference) });
   return { batch_id: batch.id, window_month: windowMonth, status: batch.status, items };
 }
 

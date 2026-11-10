@@ -9,7 +9,7 @@ import { createProduct, getProduct, listOwnedProducts, ownedProduct, pageBlocks,
 import { loadStandings } from '../domain/ranking';
 import { getOrCreateReferralCode, referralStats } from '../domain/referrals';
 import { WIDGET_TYPES } from '../domain/widgets';
-import { payoutStatus, requestPayout, walletBalances } from '../domain/wallet';
+import { payoutStatus, piiKeys, requestPayout, walletBalances } from '../domain/wallet';
 import type { Env } from '../env';
 import { nextCutoffAfter, iso } from '../lib/time';
 import { jsonTool } from './common';
@@ -140,7 +140,7 @@ export function userMcpServer(env: Env, userId: string, waitUntil: (p: Promise<u
 
   jsonTool(server, 'payouts.request', 'Request a payout of available commission earned from real payments. Funds are reserved now and transferred manually on days 01-10 of the month. Disabled while payments are simulated.', {
     currency: z.enum(['USD', 'VND']), amount_minor: z.number().int().positive(), payout_method: z.enum(['bank_transfer', 'paypal']), beneficiary_reference: z.string().min(4).max(200).describe('Where to send the money (stored encrypted)'), idempotency_key: idem,
-  }, false, async a => requestPayout(db, cfg, env.SESSION_SECRET, userId, { currency: a.currency, amountMinor: a.amount_minor, payoutMethod: a.payout_method, beneficiaryReference: a.beneficiary_reference, idempotencyKey: a.idempotency_key }));
+  }, false, async a => requestPayout(db, cfg, piiKeys(env), userId, { currency: a.currency, amountMinor: a.amount_minor, payoutMethod: a.payout_method, beneficiaryReference: a.beneficiary_reference, idempotencyKey: a.idempotency_key }));
 
   jsonTool(server, 'payouts.status', 'Your payout requests and reconciled transfers.', {}, true, async () => ({ payouts: await payoutStatus(db, userId) }));
 

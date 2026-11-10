@@ -26,8 +26,16 @@ Status: MVP defaults. The owner must approve them before go-live.
 - Users cannot transfer wallet funds to each other.
 
 ## Payouts
-1. `payouts.request` reserves available funds. It is refused while `PAYMENT_MODE=simulated`, and commissions created by simulated payments (`is_test`) are excluded from the payable balance in every mode. The minimum is `MIN_PAYOUT_USD_CENTS` or `MIN_PAYOUT_VND`. Beneficiary details are encrypted with AES-GCM.
+1. `payouts.request` reserves available funds. It is refused while `PAYMENT_MODE=simulated`, and commissions created by simulated payments (`is_test`) are excluded from the payable balance in every mode. The minimum is `MIN_PAYOUT_USD_CENTS` or `MIN_PAYOUT_VND`. Beneficiary details are encrypted with AES-GCM (see [PII encryption](#pii-encryption)).
 2. The operator prepares a monthly batch.
 3. The operator makes each bank transfer by hand, then records it with the reference, the exact amount and proof. Transfers can be recorded only on days 01–10 (ICT).
 
 Nothing transfers money automatically.
+
+## PII encryption
+Beneficiary details are sealed with the dedicated worker secret `PII_ENCRYPTION_KEY` (at least 32 characters), not with `SESSION_SECRET`, so rotating the session secret never touches stored payout details. The code is `encryptField` / `decryptField` in [`crypto.ts`](../../src/lib/crypto.ts).
+
+- New values use `v2.<kid>.<iv>.<ciphertext>`. The kid is a short SHA-256 fingerprint of the key, and `v2.<kid>` is bound as AES-GCM additional data.
+- Values written before this key existed are `v1.<iv>.<ciphertext>` and are still opened with `SESSION_SECRET`. They are not re-encrypted, so `SESSION_SECRET` must not be rotated while `v1.` rows remain in `payout_requests`.
+- While `PII_ENCRYPTION_KEY` is unset or too short, `payouts.request` fails with `payouts_unavailable` (503). Nothing falls back to `SESSION_SECRET` for new writes.
+- Rotation: move the old value to `PII_ENCRYPTION_KEY_PREVIOUS`, set a new `PII_ENCRYPTION_KEY`, and deploy. New values use the new key; values are opened by the key whose kid they carry. Drop the previous key once no row uses its kid.

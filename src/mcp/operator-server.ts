@@ -8,7 +8,7 @@ import { DomainError } from '../domain/errors';
 import { decisionStatement } from '../domain/ledger';
 import { moderateProduct, pendingModeration } from '../domain/products';
 import { CATCH_UP_DAYS, finalizeCohort, freezeBoard, produceMockMedia, runLock } from '../domain/snapshot';
-import { failPayout, preparePayoutBatch, recordManualTransfer } from '../domain/wallet';
+import { failPayout, piiKeys, preparePayoutBatch, recordManualTransfer } from '../domain/wallet';
 import type { Env } from '../env';
 import { iso } from '../lib/time';
 import { jsonTool } from './common';
@@ -113,7 +113,7 @@ export function operatorMcpServer(env: Env) {
   });
 
   jsonTool(server, 'payouts.prepare_batch', 'Prepare the monthly manual payout batch (lists beneficiaries for the operator). Idempotent per month.', { window_month: z.string().describe('YYYY-MM') }, false,
-    async a => preparePayoutBatch(db, env.SESSION_SECRET, ACTOR, a.window_month));
+    async a => preparePayoutBatch(db, piiKeys(env), ACTOR, a.window_month));
 
   jsonTool(server, 'payouts.record_manual_transfer', 'Record a bank transfer the operator made by hand (days 01-10 ICT only). Requires reference, exact amount and proof.', {
     payout_request_id: z.string(), bank_transfer_reference: z.string().min(3).max(120), amount_minor: z.number().int().positive(), transferred_at: z.string(), proof_ref: z.string().min(3).max(300),

@@ -10,7 +10,7 @@ import { payoutStatus, walletBalances } from '../domain/wallet';
 import type { Env } from '../env';
 import { providerEnabled } from '../payments/checkout';
 import { cutoffForIctDate, DAY_MS, ictDate, iso, nextCutoffAfter } from '../lib/time';
-import type { AccountView, BoardView, CheckoutView, HomeView, LayoutContext, ProductPageView, SnapshotView, WidgetBlock } from '../views/types';
+import type { AccountView, BoardView, CheckoutLockedView, CheckoutView, HomeView, LayoutContext, ProductPageView, SnapshotView, WidgetBlock } from '../views/types';
 
 export function layoutCtx(env: Env, path: string, user: UserRow | null, title: string, description?: string): LayoutContext {
   const cfg = config(env);
@@ -133,6 +133,13 @@ export async function accountView(env: Env, user: UserRow): Promise<AccountView>
   };
 }
 
+/** What a visitor who is not the intent's owner may see: the product name only, never amounts or the wallet split. */
+export async function checkoutLockedView(env: Env, intent: IntentRow, signedIn: boolean): Promise<CheckoutLockedView> {
+  const p = await getProduct(env.DB, intent.product_id);
+  return { intentId: intent.id, productName: p?.name ?? 'Unknown product', signedIn };
+}
+
+/** Full checkout details. Render only for the intent's signed-in owner. */
 export async function checkoutView(env: Env, intent: IntentRow, isOwner: boolean, csrf: string, message: string | null): Promise<CheckoutView> {
   const cfg = config(env);
   const p = await getProduct(env.DB, intent.product_id);

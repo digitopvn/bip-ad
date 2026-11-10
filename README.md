@@ -62,6 +62,7 @@ One-time setup for a new environment:
 wrangler d1 create bip-ad-production && wrangler kv namespace create bip-ad-oauth-production   # put the ids in env.production
 pnpm db:migrate:production
 for s in SESSION_SECRET OPERATOR_TOKEN; do wrangler secret put $s --env production; done
+scripts/set-worker-secrets.sh production PII_ENCRYPTION_KEY   # 32+ random characters (`openssl rand -base64 32`); encrypts payout details, payouts are refused without it (ADR-0005)
 scripts/set-worker-secrets.sh production   # hidden prompts for GitHub/Google OAuth; stores them in `ak secrets` and on the worker
 scripts/set-worker-secrets.sh production AI_CLOUDFLARE_ACCOUNT_ID AI_CLOUDFLARE_API_TOKEN   # Workers AI account for moderation
 scripts/setup-paypal.sh production   # Live REST app: checks the credentials, creates or reuses the webhook, stores PAYPAL_CLIENT_ID/SECRET/WEBHOOK_ID
